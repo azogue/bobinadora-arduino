@@ -34,5 +34,6 @@ LCD de 2x16, 2 botones simples, y un rotary encoder.
 
 .. code:: bash
 
-    ClickEncoder.h, EEPROM.h, elapsedMillis.h, LCD.h, LiquidCrystal_I2C.h (F Malpartida), Stepper.h, TimerOne.h, Wire.h.
+    ClickEncoder, elapsedMillis, LCD, LiquidCrystal_I2C (F Malpartida), TimerOne.
+    EEPROM, Stepper, Wire.
 ..
