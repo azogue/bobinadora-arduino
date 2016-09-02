@@ -57,15 +57,15 @@
 //**********************************
 
 // PINOUT
-#define PIN_BOTON_START           25          // Botón de START / REANUDACIÓN
-#define PIN_BOTON_PARO_RESET      24          // Botón de PARO / RESET
+#define PIN_BOTON_START           4          // Botón de START / REANUDACIÓN
+#define PIN_BOTON_PARO_RESET      3          // Botón de PARO / RESET
 
-#define PIN_FALLO_1               23          // Señal de Fallo 1
-#define PIN_FALLO_2               22          // Señal de Fallo 2
+#define PIN_FALLO_1               5          // Señal de Fallo 1
+#define PIN_FALLO_2               6          // Señal de Fallo 2
 
-#define PIN_ROTARY_ENC_CLK        A1
-#define PIN_ROTARY_ENC_DT         A0
-#define PIN_ROTARY_ENC_SW         A2
+#define PIN_ROTARY_ENC_CLK        A15
+#define PIN_ROTARY_ENC_DT         A14
+#define PIN_ROTARY_ENC_SW         A13
 
 #define PIN_FIN_CARRERA_HOME      7           // Sensor de final de carrera Home
 
@@ -141,7 +141,7 @@ uint8_t programa_seleccionado;
 uint8_t variable_seleccionada;
 bool interruptor;
 
-uint8_t sensor_final_carrera = HIGH;
+uint8_t sensor_final_carrera = LOW;
 
 uint8_t estadoBoton_start = 0;
 uint8_t estadoBoton_paro_reset = 0;
@@ -213,8 +213,8 @@ void setup_motor_bobinadora()
 
   // Apagando motores al inicio
   digitalWrite(PIN_MOTOR_FRENO, LOW);    //Desactivamos freno
-  digitalWrite(PIN_MOTOR_DEVANADOR, HIGH);  // Desactivamos motor devanador
-  digitalWrite(PIN_MOTOR_VARIADOR, HIGH);    //Desactivamos variador
+  digitalWrite(PIN_MOTOR_DEVANADOR, LOW);  // Desactivamos motor devanador
+  digitalWrite(PIN_MOTOR_VARIADOR, LOW);    //Desactivamos variador
 
   contador_vueltas_motor = 0;
   movimiento_en_ida = true;
@@ -368,20 +368,6 @@ void loop()
                            programas[programa_seleccionado].velocidad_movimiento_rpm,
                            programas[programa_seleccionado].numero_movimientos,
                            programas[programa_seleccionado].num_periodos_freno);
-
-      if (sinceStatus > 500)
-      {
-        //set_texto_fila_lcd(String("*Elapsed... ") + i_time_string(sinceStart), 1);
-        set_texto_fila_lcd(String("*MOVS: ") + contador_vueltas_motor + String("/") + programas[programa_seleccionado].numero_movimientos, 1);
-        if (VERBOSE)
-        {
-          Serial.print("*MOVS: ");
-          Serial.print(contador_vueltas_motor);
-          Serial.print("/");
-          Serial.println(programas[programa_seleccionado].numero_movimientos);
-        }
-        sinceStatus = 0;
-      }
     }
   }
   // En modo paro, aguardando reset o reanudación
@@ -464,15 +450,27 @@ void update_last_state_input()
 
 void ajuste_inicial_cabezal_bobinadora(uint16_t distanciaoffset)
 {
+  if (VERBOSE)
+  {
+    Serial.print("sensor_final_carrera: ");
+    Serial.println(sensor_final_carrera);
+  }
+  sensor_final_carrera = digitalRead(PIN_FIN_CARRERA_HOME);
   //Giramos el motor hasta que encuentre el final de carrera "home"
   myStepper.setSpeed(100);
-  while(sensor_final_carrera == HIGH)
+  digitalWrite(PIN_MOTOR_DEVANADOR, HIGH);  // Activamos motor devanador
+
+  while(sensor_final_carrera == LOW)
   {
-    digitalWrite(PIN_MOTOR_DEVANADOR, LOW);  // Activamos motor devanador
     myStepper.step(-1);
     sensor_final_carrera = digitalRead(PIN_FIN_CARRERA_HOME);
   }
   // Una vez tenemos el devanador en el home lo llevamos a su distancia offset
+  if (VERBOSE)
+  {
+    Serial.print("Avanzando Offset: ");
+    Serial.println(distanciaoffset);
+  }
   myStepper.step(distanciaoffset);
 }
 
@@ -488,18 +486,17 @@ void cuenta_vueltas_motor(uint16_t distanciamov, uint16_t velocidadmov, uint16_t
 
   if (contador_vueltas_motor < nmovimientos)
   {
-    /*if (contador_vueltas_motor > nmovimientos - num_periodos_freno)
-    {
-      digitalWrite(PIN_MOTOR_FRENO, HIGH);   //Activamos freno
-    }*/
     if (VERBOSE)
     {
       Serial.print("Distancia movimiento step: ");
-      Serial.print(distanciamov * signo);
+      Serial.print((int)distanciamov * signo);
       Serial.print("; VUELTA n=");
-      Serial.println(contador_vueltas_motor);
+      Serial.print(contador_vueltas_motor);
+      Serial.print("/");
+      Serial.println(programas[programa_seleccionado].numero_movimientos);
     }
-    myStepper.step(distanciamov * signo); //Distancia en número de pasos
+    set_texto_fila_lcd(String("*MOVS: ") + (contador_vueltas_motor + 1) + String("/") + programas[programa_seleccionado].numero_movimientos, 1);
+    myStepper.step((int)distanciamov * signo); //Distancia en número de pasos
     contador_vueltas_motor += 1;
   }
   else
@@ -532,9 +529,16 @@ void proceso_de_freno_motor(uint16_t num_periodos_freno)
     {
       periodos_freno += 1;
       set_texto_fila_lcd(String("* Braking in ") + ((num_periodos_freno - periodos_freno) * PERIODO_FRENO_SEG), 1);
+      if (VERBOSE)
+      {
+        Serial.print("* Braking in ");
+        Serial.println((num_periodos_freno - periodos_freno) * PERIODO_FRENO_SEG);
+      }
     }
   }
   //Activamos freno
+  if (VERBOSE)
+    Serial.println("* ACTIVANDO FRENO");
   digitalWrite(PIN_MOTOR_FRENO, HIGH);
 
   // Informamos y salimos del proceso de frenado
@@ -576,8 +580,8 @@ void set_estado_marcha(bool desde_paro, uint16_t velocidadmov)
   myStepper.setSpeed(velocidadmov);  // Velocidad del devanador
   digitalWrite(PIN_MOTOR_FRENO, LOW);   //Desactivamos freno
 
-  digitalWrite(PIN_MOTOR_DEVANADOR, LOW);  // Activamos motor devanador
-  digitalWrite(PIN_MOTOR_VARIADOR, LOW);  //Activamos variador
+  digitalWrite(PIN_MOTOR_DEVANADOR, HIGH);  // Activamos motor devanador
+  digitalWrite(PIN_MOTOR_VARIADOR, HIGH);  //Activamos variador
 }
 
 bool set_estado_paro_si_procede(bool act_boton_paro, bool act_fallo_1, bool act_fallo_2)
@@ -591,11 +595,10 @@ bool set_estado_paro_si_procede(bool act_boton_paro, bool act_fallo_1, bool act_
     sinceStart = 0;
     sinceStatus = 0;
 
-    //digitalWrite(PIN_MOTOR_FRENO, HIGH);   //Activamos freno
     digitalWrite(LED_PLACA, LOW);  // Máquina en paro
 
-    digitalWrite(PIN_MOTOR_DEVANADOR, HIGH);  // Desactivamos motor devanador
-    digitalWrite(PIN_MOTOR_VARIADOR, HIGH);    //Desactivamos variador
+    digitalWrite(PIN_MOTOR_DEVANADOR, LOW);  // Desactivamos motor devanador
+    digitalWrite(PIN_MOTOR_VARIADOR, LOW);    //Desactivamos variador
     return true;
   }
   return false;
