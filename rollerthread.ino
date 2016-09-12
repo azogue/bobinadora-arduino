@@ -63,9 +63,9 @@
 #define PIN_FALLO_1               5          // Señal de Fallo 1
 #define PIN_FALLO_2               6          // Señal de Fallo 2
 
-#define PIN_ROTARY_ENC_CLK        A15
-#define PIN_ROTARY_ENC_DT         A14
-#define PIN_ROTARY_ENC_SW         A13
+#define PIN_ROTARY_ENC_CLK        A2
+#define PIN_ROTARY_ENC_DT         A1
+#define PIN_ROTARY_ENC_SW         A0
 
 #define PIN_FIN_CARRERA_HOME      7           // Sensor de final de carrera Home
 
@@ -83,7 +83,7 @@
 // Resto
 
 #define VERBOSE                   true
-#define FORZAR_REGRABADO_DEFAULTS false       // Activando, se fuerza la re-escritura de los parámetros por defecto de los 10 programas
+#define FORZAR_REGRABADO_DEFAULTS true       // Activando, se fuerza la re-escritura de los parámetros por defecto de los 10 programas
 
 #define LCD_CHARS                 16
 #define LCD_LINES                 2
@@ -114,16 +114,16 @@ double PERIODO_FRENO_SEG = .5;
 uint16_t OPCIONES_RANGO_MIN[5] = {0, 100, 10, 0, 0};
 uint16_t OPCIONES_RANGO_MAX[5] = {1500, 3000, 400, (uint16_t)(5 / PERIODO_FRENO_SEG), 1000};
 
-uint16_t VALORES_DEFECTO_P1[5] = {19, 800, 250, 1, 550};
-uint16_t VALORES_DEFECTO_P2[5] = {50, 40, 100, 3, 20};
-uint16_t VALORES_DEFECTO_P3[5] = {30, 20, 100, 3, 10};
-uint16_t VALORES_DEFECTO_P4[5] = {50, 20, 100, 3, 10};
-uint16_t VALORES_DEFECTO_P5[5] = {100, 80, 150, 5, 40};
-uint16_t VALORES_DEFECTO_P6[5] = {100, 80, 150, 5, 40};
-uint16_t VALORES_DEFECTO_P7[5] = {150, 80, 150, 5, 40};
-uint16_t VALORES_DEFECTO_P8[5] = {0, 0, 0, 0, 0};
-uint16_t VALORES_DEFECTO_P9[5] = {0, 0, 0, 0, 0};
-uint16_t VALORES_DEFECTO_P10[5] = {0, 0, 0, 0, 0};
+uint16_t VALORES_DEFECTO_P1[5] = {43, 900, 127, 0, 70};
+uint16_t VALORES_DEFECTO_P2[5] = {43, 900, 127, 0, 70};
+uint16_t VALORES_DEFECTO_P3[5] = {43, 900, 127, 0, 70};
+uint16_t VALORES_DEFECTO_P4[5] = {43, 900, 127, 0, 70};
+uint16_t VALORES_DEFECTO_P5[5] = {43, 900, 127, 0, 70};
+uint16_t VALORES_DEFECTO_P6[5] = {43, 900, 127, 0, 70};
+uint16_t VALORES_DEFECTO_P7[5] = {43, 900, 127, 0, 70};
+uint16_t VALORES_DEFECTO_P8[5] = {43, 900, 127, 0, 70};
+uint16_t VALORES_DEFECTO_P9[5] = {43, 900, 127, 0, 70};
+uint16_t VALORES_DEFECTO_P10[5] = {43, 900, 127, 0, 70};
 
 struct config_prog_t
 {
