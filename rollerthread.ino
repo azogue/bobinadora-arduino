@@ -101,6 +101,7 @@
 #define NUM_PROGRAMAS             10
 #define NUM_OPCIONES              5
 #define DELAY_MS_CMD_MENU         500
+#define DELAY_ENTRE_PARO_RESET_MS 5000
 
 #define CASEBREAK(label) case label: break;
 
@@ -143,6 +144,7 @@ config_prog_t programas[NUM_PROGRAMAS];
 
 volatile uint8_t estado_general;
 volatile uint8_t tipo_parada;
+volatile uint8_t pin_fallo;
 uint8_t programa_seleccionado;
 uint8_t variable_seleccionada;
 bool interruptor;
@@ -204,10 +206,9 @@ void setup_interrupts()
   pinMode(PIN_BOTON_PARO_RESET, INPUT);
   pinMode(PIN_FALLO_1, INPUT);
   pinMode(PIN_FALLO_2, INPUT);
-  //attachInterrupt(digitalPinToInterrupt(pin), ISR, mode);
   attachInterrupt(digitalPinToInterrupt(PIN_BOTON_PARO_RESET), isr_set_estado_paro_o_reset_manual, RISING);
-  attachInterrupt(digitalPinToInterrupt(PIN_FALLO_1), isr_set_estado_paro_por_fallo, RISING);
-  attachInterrupt(digitalPinToInterrupt(PIN_FALLO_2), isr_set_estado_paro_por_fallo, RISING);
+  attachInterrupt(digitalPinToInterrupt(PIN_FALLO_1), isr_set_estado_paro_por_fallo_1, RISING);
+  attachInterrupt(digitalPinToInterrupt(PIN_FALLO_2), isr_set_estado_paro_por_fallo_2, RISING);
 }
 
 void setup_motor_bobinadora()
@@ -370,7 +371,7 @@ void loop()
     set_texto_fila_lcd(String("** RESET P_") + (programa_seleccionado + 1), 0);
     if (VERBOSE)
     {
-      Serial.print("Se resetea el PROGRAMA ");
+      Serial.print("Se resetea el PROGRAMA_");
       Serial.println(programa_seleccionado + 1);
     }
     delay(DELAY_MS_CMD_MENU);
@@ -387,17 +388,30 @@ void loop()
       if (tipo_parada == TIPO_PARADA_EMERGENCIA)
       {
         set_texto_fila_lcd(String("** ERROR P_") + (programa_seleccionado + 1), 0);
+        if (VERBOSE)
+        {
+          Serial.print("** PARADA DE EMERGENCIA del PROGRAMA_");
+          Serial.println(programa_seleccionado + 1);
+        }
       }
       else
       {
         set_texto_fila_lcd(String("** STOP P_") + (programa_seleccionado + 1), 0);
-      }
-      if (VERBOSE)
-      {
-        Serial.print("** PARADA DE EMERGENCIA del PROGRAMA ");
-        Serial.println(programa_seleccionado + 1);
+        if (VERBOSE)
+        {
+          Serial.print("** PARADA MANUAL del PROGRAMA_");
+          Serial.println(programa_seleccionado + 1);
+        }
       }
       tipo_parada = TIPO_PARADA_FINALIZACION;
+    }
+
+    // Para depurar sensores de fallo:
+    if (VERBOSE && pin_fallo != -1)
+    {
+      Serial.print("** Entrada en PARO por activacion de sensor en PIN: ");
+      Serial.println(pin_fallo);
+      pin_fallo = -1;
     }
 
     // Reanudación del programa seleccionado
@@ -493,6 +507,7 @@ void cuenta_vueltas_motor(uint16_t distanciamov, uint16_t velocidadmov, uint16_t
 
   if (contador_vueltas_motor < nmovimientos)
   {
+    sinceStart = 0;
     if (VERBOSE)
     {
       Serial.print("Distancia movimiento step: ");
@@ -508,7 +523,17 @@ void cuenta_vueltas_motor(uint16_t distanciamov, uint16_t velocidadmov, uint16_t
   }
   else
   {
+    if (VERBOSE)
+    {
+      Serial.print("TERMINA CORRECTAMENTE PROGRAMA_");
+      Serial.println(programa_seleccionado + 1);
+    }
     set_estado_paro_por_finalizacion(num_periodos_freno);
+    if (VERBOSE)
+    {
+      Serial.print("Entrada en SELECC tras terminar PROGRAMA_");
+      Serial.println(programa_seleccionado + 1);
+    }
     set_estado_seleccion();
   }
 }
@@ -589,9 +614,9 @@ void set_estado_marcha(bool desde_paro, uint16_t velocidadmov)
   digitalWrite(PIN_MOTOR_VARIADOR, HIGH);  //Activamos variador
 }
 
-void isr_set_estado_paro_por_fallo()
+void isr_set_estado_paro_por_fallo_1()
 {
-  // PARO del programa en marcha (con sensores FALLO_1, o FALLO_2)
+  // PARO del programa en marcha (con sensor FALLO_1)
   if (estado_general == STATE_MARCHA)
   {
     digitalWrite(LED_PLACA, LOW);             // Máquina en paro
@@ -602,12 +627,13 @@ void isr_set_estado_paro_por_fallo()
     // Set estado PARO
     estado_general = STATE_PARO;
     tipo_parada = TIPO_PARADA_EMERGENCIA;
+    pin_fallo = PIN_FALLO_1;
   }
 }
 
-void isr_set_estado_paro_o_reset_manual()
+void isr_set_estado_paro_por_fallo_2()
 {
-  // PARO manual del programa en marcha (con botón PARO/RESET)
+  // PARO del programa en marcha (con sensor FALLO_2)
   if (estado_general == STATE_MARCHA)
   {
     digitalWrite(LED_PLACA, LOW);             // Máquina en paro
@@ -617,16 +643,33 @@ void isr_set_estado_paro_o_reset_manual()
 
     // Set estado PARO
     estado_general = STATE_PARO;
-    tipo_parada = TIPO_PARADA_MANUAL;
+    tipo_parada = TIPO_PARADA_EMERGENCIA;
+    pin_fallo = PIN_FALLO_2;
   }
+}
+
+void isr_set_estado_paro_o_reset_manual()
+{
   // Entrada a RESET manual tras PARO (con botón PARO/RESET)
-  // TODO Comprobar que la isr no se active 2 veces (paro + reset) con el pulsador. ¿Fijar t_paro para comparar?
-  // else if (estado_general == STATE_PARO && sinceStart > 1000)
-  else if (estado_general == STATE_PARO)
+  if ((estado_general == STATE_PARO) && (sinceStart > DELAY_ENTRE_PARO_RESET_MS))
   {
     digitalWrite(PIN_MOTOR_DEVANADOR, LOW); // Desactivamos motor devanador
     estado_general = STATE_RESET;
-    tipo_parada = TIPO_PARADA_FINALIZACION;
+    tipo_parada = TIPO_PARADA_MANUAL;
+    pin_fallo = -1;
+  }
+  // PARO manual del programa en marcha (con botón PARO/RESET)
+  else if (estado_general == STATE_MARCHA)
+  {
+    digitalWrite(LED_PLACA, LOW);             // Máquina en paro
+    //digitalWrite(PIN_MOTOR_DEVANADOR, LOW); // Desactivamos motor devanador
+    digitalWrite(PIN_MOTOR_VARIADOR, LOW);    //Desactivamos variador
+    digitalWrite(PIN_MOTOR_FRENO, HIGH);      // Frenado instantáneo
+
+    // Set estado PARO
+    estado_general = STATE_PARO;
+    tipo_parada = TIPO_PARADA_MANUAL;
+    pin_fallo = PIN_BOTON_PARO_RESET;
   }
 }
 
@@ -643,6 +686,7 @@ void set_estado_paro_por_finalizacion(uint16_t num_periodos_freno)
   sinceStart = 0;
   sinceStatus = 0;
   tipo_parada = TIPO_PARADA_FINALIZACION;
+  pin_fallo = -1;
 }
 
 void set_estado_seleccion()
@@ -650,6 +694,7 @@ void set_estado_seleccion()
   set_texto_lcd(String("* Selecciona P:"), String("- PROGRAMA ") + (programa_seleccionado + 1));
   estado_general = STATE_SELECC;
   tipo_parada = TIPO_PARADA_FINALIZACION;
+  pin_fallo = -1;
   hay_doble_click_rotary_enc = false;
   hay_click_rotary_enc = false;
   (void)rotary_encoder->getValue();
