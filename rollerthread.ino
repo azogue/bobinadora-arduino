@@ -57,11 +57,11 @@
 //**********************************
 
 // PINOUT
-#define PIN_BOTON_START           4          // Botón de START / REANUDACIÓN
-#define PIN_BOTON_PARO_RESET      3          // Botón de PARO / RESET
+#define PIN_BOTON_START           4           // Botón de START / REANUDACIÓN
 
-#define PIN_FALLO_1               5          // Señal de Fallo 1
-#define PIN_FALLO_2               6          // Señal de Fallo 2
+#define PIN_BOTON_PARO_RESET      3           // Botón de PARO / RESET  (Interrupt)
+#define PIN_FALLO_1               18          // Señal de Fallo 1 (Interrupt)
+#define PIN_FALLO_2               19          // Señal de Fallo 2 (Interrupt)
 
 #define PIN_ROTARY_ENC_CLK        A2
 #define PIN_ROTARY_ENC_DT         A1
@@ -83,7 +83,7 @@
 // Resto
 
 #define VERBOSE                   true
-#define FORZAR_REGRABADO_DEFAULTS true       // Activando, se fuerza la re-escritura de los parámetros por defecto de los 10 programas
+#define FORZAR_REGRABADO_DEFAULTS false       // Activando, se fuerza la re-escritura de los parámetros por defecto de los 10 programas
 
 #define LCD_CHARS                 16
 #define LCD_LINES                 2
@@ -92,6 +92,11 @@
 #define STATE_MARCHA              1
 #define STATE_PARO                2
 #define STATE_CONFIG              3
+#define STATE_RESET               4
+
+#define TIPO_PARADA_FINALIZACION  0
+#define TIPO_PARADA_MANUAL        1
+#define TIPO_PARADA_EMERGENCIA    2
 
 #define NUM_PROGRAMAS             10
 #define NUM_OPCIONES              5
@@ -136,21 +141,15 @@ struct config_prog_t
 const int eeAddressDelta = sizeof(config_prog_t);
 config_prog_t programas[NUM_PROGRAMAS];
 
-uint8_t estado_general;
+volatile uint8_t estado_general;
+volatile uint8_t tipo_parada;
 uint8_t programa_seleccionado;
 uint8_t variable_seleccionada;
 bool interruptor;
 
 uint8_t sensor_final_carrera = LOW;
-
 uint8_t estadoBoton_start = 0;
-uint8_t estadoBoton_paro_reset = 0;
-uint8_t estadoBoton_fallo_1 = 0;
-uint8_t estadoBoton_fallo_2 = 0;
 uint8_t estadoBotonLast_start = 0;
-uint8_t estadoBotonLast_paro_reset = 0;
-uint8_t estadoBotonLast_fallo_1 = 0;
-uint8_t estadoBotonLast_fallo_2 = 0;
 
 LiquidCrystal_I2C lcd( 0x3F, 2,   1,  0,  4,  5,  6,  7, 3, POSITIVE);
 
@@ -176,11 +175,12 @@ bool movimiento_en_ida;
 void setup()
 {
   Serial.begin(9600);
-  setup_inputs();
   setup_rotary_encoder();
   setup_lcd();
   setup_motor_bobinadora();
   setup_configuraciones_programa();
+  setup_inputs();
+  setup_interrupts();
 
   programa_seleccionado = 0;
   variable_seleccionada = 0;
@@ -196,11 +196,18 @@ void setup()
 void setup_inputs()
 {
   pinMode(PIN_BOTON_START, INPUT);
-  pinMode(PIN_BOTON_PARO_RESET, INPUT);
+  pinMode(PIN_FIN_CARRERA_HOME, INPUT); // Final de carrera Home
+}
 
+void setup_interrupts()
+{
+  pinMode(PIN_BOTON_PARO_RESET, INPUT);
   pinMode(PIN_FALLO_1, INPUT);
   pinMode(PIN_FALLO_2, INPUT);
-  pinMode(PIN_FIN_CARRERA_HOME, INPUT); // Final de carrera Home
+  //attachInterrupt(digitalPinToInterrupt(pin), ISR, mode);
+  attachInterrupt(digitalPinToInterrupt(PIN_BOTON_PARO_RESET), isr_set_estado_paro_o_reset_manual, RISING);
+  attachInterrupt(digitalPinToInterrupt(PIN_FALLO_1), isr_set_estado_paro_por_fallo, RISING);
+  attachInterrupt(digitalPinToInterrupt(PIN_FALLO_2), isr_set_estado_paro_por_fallo, RISING);
 }
 
 void setup_motor_bobinadora()
@@ -217,7 +224,7 @@ void setup_motor_bobinadora()
   digitalWrite(PIN_MOTOR_VARIADOR, LOW);    //Desactivamos variador
 
   contador_vueltas_motor = 0;
-  movimiento_en_ida = true;
+  i_reset_direccion_devanador();
 }
 
 void setup_lcd()
@@ -313,6 +320,10 @@ int eeprom_write_config_defecto(int eeAddress, int indice_programa, const uint16
   return eeAddress;
 }
 
+void i_reset_direccion_devanador()
+{
+  movimiento_en_ida = false;
+}
 
 //**********************************
 //** Bucle general *****************
@@ -320,9 +331,9 @@ int eeprom_write_config_defecto(int eeAddress, int indice_programa, const uint16
 
 void loop()
 {
-  read_state_input();
+  read_start_button();
 
-  // Modos de funcionamiento: CONFIG / SELEC / MARCHA / PARO
+  // Modos de funcionamiento: CONFIG / SELEC / MARCHA / RESET / PARO
 
   // Inicio de programa seleccionado
   if ((estado_general == STATE_SELECC) & (i_sube_flanco(estadoBotonLast_start, estadoBoton_start)))
@@ -345,34 +356,50 @@ void loop()
   {
     configuracion_parametros_programa_actual();
   }
+  // En modo marcha...
   else if (estado_general == STATE_MARCHA)
   {
-    // PARO del programa en marcha (con botón PARO/RESET, FALLO_1, o FALLO_2)
-    if (set_estado_paro_si_procede(i_sube_flanco(estadoBotonLast_paro_reset, estadoBoton_paro_reset),
-                                   i_sube_flanco(estadoBotonLast_fallo_1, estadoBoton_fallo_1),
-                                   i_sube_flanco(estadoBotonLast_fallo_2, estadoBoton_fallo_2)))
+    cuenta_vueltas_motor(programas[programa_seleccionado].distancia_movimiento_num_pasos,
+                         programas[programa_seleccionado].velocidad_movimiento_rpm,
+                         programas[programa_seleccionado].numero_movimientos,
+                         programas[programa_seleccionado].num_periodos_freno);
+  }
+  else if (estado_general == STATE_RESET)
+  {
+    // Reset del programa seleccionado
+    set_texto_fila_lcd(String("** RESET P_") + (programa_seleccionado + 1), 0);
+    if (VERBOSE)
     {
-      set_texto_fila_lcd(String("** STOP P_") + (programa_seleccionado + 1), 0);
-      if (VERBOSE)
-      {
-        Serial.print("** Se para el PROGRAMA ");
-        Serial.println(programa_seleccionado + 1);
-      }
-      // Frenado antes de permitir la reanudación:
-      proceso_de_freno_motor(programas[programa_seleccionado].num_periodos_freno);
+      Serial.print("Se resetea el PROGRAMA ");
+      Serial.println(programa_seleccionado + 1);
     }
-    // En modo marcha...
-    else
-    {
-      cuenta_vueltas_motor(programas[programa_seleccionado].distancia_movimiento_num_pasos,
-                           programas[programa_seleccionado].velocidad_movimiento_rpm,
-                           programas[programa_seleccionado].numero_movimientos,
-                           programas[programa_seleccionado].num_periodos_freno);
-    }
+    delay(DELAY_MS_CMD_MENU);
+    set_estado_seleccion();
   }
   // En modo paro, aguardando reset o reanudación
   else // if (estado_general == STATE_PARO)
   {
+    if (tipo_parada != TIPO_PARADA_FINALIZACION)
+    {
+      digitalWrite(PIN_MOTOR_DEVANADOR, LOW);  // Desactivamos motor devanador
+      sinceStart = 0;
+      sinceStatus = 0;
+      if (tipo_parada == TIPO_PARADA_EMERGENCIA)
+      {
+        set_texto_fila_lcd(String("** ERROR P_") + (programa_seleccionado + 1), 0);
+      }
+      else
+      {
+        set_texto_fila_lcd(String("** STOP P_") + (programa_seleccionado + 1), 0);
+      }
+      if (VERBOSE)
+      {
+        Serial.print("** PARADA DE EMERGENCIA del PROGRAMA ");
+        Serial.println(programa_seleccionado + 1);
+      }
+      tipo_parada = TIPO_PARADA_FINALIZACION;
+    }
+
     // Reanudación del programa seleccionado
     if (i_sube_flanco(estadoBotonLast_start, estadoBoton_start))
     {
@@ -385,19 +412,7 @@ void loop()
       delay(DELAY_MS_CMD_MENU);
       set_estado_marcha(true, programas[programa_seleccionado].velocidad_movimiento_rpm);
     }
-    // Reset de posición del programa seleccionado
-    else if (i_sube_flanco(estadoBotonLast_paro_reset, estadoBoton_paro_reset))
-    {
-      set_texto_fila_lcd(String("** RESET P_") + (programa_seleccionado + 1), 0);
-      if (VERBOSE)
-      {
-        Serial.print("Se resetea el PROGRAMA ");
-        Serial.println(programa_seleccionado + 1);
-      }
-      delay(DELAY_MS_CMD_MENU);
-      set_estado_seleccion();
-    }
-    else
+    else  // Actualiza LCD status
     {
       if (sinceStatus > 1000)
       {
@@ -406,8 +421,7 @@ void loop()
       }
     }
   }
-
-  update_last_state_input();
+  update_last_state_start_button();
 }
 
 
@@ -431,21 +445,14 @@ void print_config_programa(uint8_t indice_programa)
   i_print_config_programa(indice_programa, conf_print);
 }
 
-void read_state_input()
+void read_start_button()
 {
   estadoBoton_start = digitalRead(PIN_BOTON_START);
-  estadoBoton_paro_reset = digitalRead(PIN_BOTON_PARO_RESET);
-  estadoBoton_fallo_1 = digitalRead(PIN_FALLO_1);
-  estadoBoton_fallo_2 = digitalRead(PIN_FALLO_2);
-  sensor_final_carrera = digitalRead(PIN_FIN_CARRERA_HOME);
 }
 
-void update_last_state_input()
+void update_last_state_start_button()
 {
   estadoBotonLast_start = estadoBoton_start;
-  estadoBotonLast_paro_reset = estadoBoton_paro_reset;
-  estadoBotonLast_fallo_1 = estadoBoton_fallo_1;
-  estadoBotonLast_fallo_2 = estadoBoton_fallo_2;
 }
 
 void ajuste_inicial_cabezal_bobinadora(uint16_t distanciaoffset)
@@ -462,16 +469,16 @@ void ajuste_inicial_cabezal_bobinadora(uint16_t distanciaoffset)
 
   while(sensor_final_carrera == LOW)
   {
-    myStepper.step(-1);
+    myStepper.step(1);
     sensor_final_carrera = digitalRead(PIN_FIN_CARRERA_HOME);
   }
   // Una vez tenemos el devanador en el home lo llevamos a su distancia offset
   if (VERBOSE)
   {
     Serial.print("Avanzando Offset: ");
-    Serial.println(distanciaoffset);
+    Serial.println(-distanciaoffset);
   }
-  myStepper.step(distanciaoffset);
+  myStepper.step(-distanciaoffset);
 }
 
 void cuenta_vueltas_motor(uint16_t distanciamov, uint16_t velocidadmov, uint16_t nmovimientos, uint16_t num_periodos_freno)
@@ -501,9 +508,7 @@ void cuenta_vueltas_motor(uint16_t distanciamov, uint16_t velocidadmov, uint16_t
   }
   else
   {
-    set_estado_paro_si_procede(true, true, true);
-    // Frenado antes de selección:
-    proceso_de_freno_motor(num_periodos_freno);
+    set_estado_paro_por_finalizacion(num_periodos_freno);
     set_estado_seleccion();
   }
 }
@@ -561,13 +566,13 @@ void set_estado_marcha(bool desde_paro, uint16_t velocidadmov)
     // Esperar a botón start
     while (true)
     {
-      read_state_input();
+      read_start_button();
       if (i_sube_flanco(estadoBotonLast_start, estadoBoton_start))
         break;
-      update_last_state_input();
+      update_last_state_start_button();
     }
 
-    movimiento_en_ida = true;
+    i_reset_direccion_devanador();
     contador_vueltas_motor = 0;
   }
 
@@ -584,30 +589,67 @@ void set_estado_marcha(bool desde_paro, uint16_t velocidadmov)
   digitalWrite(PIN_MOTOR_VARIADOR, HIGH);  //Activamos variador
 }
 
-bool set_estado_paro_si_procede(bool act_boton_paro, bool act_fallo_1, bool act_fallo_2)
+void isr_set_estado_paro_por_fallo()
 {
-  // TODO Usar act_boton_paro, bool act_fallo_1, bool act_fallo_2 para diferenciar tipo de parada
-  if (act_boton_paro | act_fallo_1 | act_fallo_2)
+  // PARO del programa en marcha (con sensores FALLO_1, o FALLO_2)
+  if (estado_general == STATE_MARCHA)
   {
-    estado_general = STATE_PARO;
-    hay_doble_click_rotary_enc = false;
-    hay_click_rotary_enc = false;
-    sinceStart = 0;
-    sinceStatus = 0;
-
-    digitalWrite(LED_PLACA, LOW);  // Máquina en paro
-
-    digitalWrite(PIN_MOTOR_DEVANADOR, LOW);  // Desactivamos motor devanador
+    digitalWrite(LED_PLACA, LOW);             // Máquina en paro
+    //digitalWrite(PIN_MOTOR_DEVANADOR, LOW); // Desactivamos motor devanador
     digitalWrite(PIN_MOTOR_VARIADOR, LOW);    //Desactivamos variador
-    return true;
+    digitalWrite(PIN_MOTOR_FRENO, HIGH);      // Frenado instantáneo
+
+    // Set estado PARO
+    estado_general = STATE_PARO;
+    tipo_parada = TIPO_PARADA_EMERGENCIA;
   }
-  return false;
+}
+
+void isr_set_estado_paro_o_reset_manual()
+{
+  // PARO manual del programa en marcha (con botón PARO/RESET)
+  if (estado_general == STATE_MARCHA)
+  {
+    digitalWrite(LED_PLACA, LOW);             // Máquina en paro
+    //digitalWrite(PIN_MOTOR_DEVANADOR, LOW); // Desactivamos motor devanador
+    digitalWrite(PIN_MOTOR_VARIADOR, LOW);    //Desactivamos variador
+    digitalWrite(PIN_MOTOR_FRENO, HIGH);      // Frenado instantáneo
+
+    // Set estado PARO
+    estado_general = STATE_PARO;
+    tipo_parada = TIPO_PARADA_MANUAL;
+  }
+  // Entrada a RESET manual tras PARO (con botón PARO/RESET)
+  // TODO Comprobar que la isr no se active 2 veces (paro + reset) con el pulsador. ¿Fijar t_paro para comparar?
+  // else if (estado_general == STATE_PARO && sinceStart > 1000)
+  else if (estado_general == STATE_PARO)
+  {
+    digitalWrite(PIN_MOTOR_DEVANADOR, LOW); // Desactivamos motor devanador
+    estado_general = STATE_RESET;
+    tipo_parada = TIPO_PARADA_FINALIZACION;
+  }
+}
+
+void set_estado_paro_por_finalizacion(uint16_t num_periodos_freno)
+{
+  digitalWrite(LED_PLACA, LOW);             // Máquina en paro
+  digitalWrite(PIN_MOTOR_DEVANADOR, LOW);   // Desactivamos motor devanador
+  digitalWrite(PIN_MOTOR_VARIADOR, LOW);    // Desactivamos variador
+
+  // Frenado antes de selección:
+  proceso_de_freno_motor(num_periodos_freno);
+
+  estado_general = STATE_PARO;
+  sinceStart = 0;
+  sinceStatus = 0;
+  tipo_parada = TIPO_PARADA_FINALIZACION;
 }
 
 void set_estado_seleccion()
 {
   set_texto_lcd(String("* Selecciona P:"), String("- PROGRAMA ") + (programa_seleccionado + 1));
   estado_general = STATE_SELECC;
+  tipo_parada = TIPO_PARADA_FINALIZACION;
   hay_doble_click_rotary_enc = false;
   hay_click_rotary_enc = false;
   (void)rotary_encoder->getValue();
@@ -925,5 +967,3 @@ void set_texto_lcd(String fila_1, String fila_2)
   set_texto_fila_lcd(fila_1, 0);
   set_texto_fila_lcd(fila_2, 1);
 }
-
-
