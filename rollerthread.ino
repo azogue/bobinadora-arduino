@@ -151,14 +151,14 @@ config_prog_t programas[NUM_PROGRAMAS];
 // Contadores de tiempo
 elapsedMillis sinceStart;
 elapsedMillis sinceStatus;
+elapsedMillis sinceBrake;
 
 // Variables 'volátiles' (se escriben en interrupciones)
-volatile elapsedMillis sinceBrake;
 volatile uint8_t estado_general;
 volatile uint8_t tipo_parada;
 volatile uint8_t pin_fallo;
 volatile bool freno_activo;
-//volatile unsigned long activacion_freno_elapsedMillis;
+volatile unsigned long activacion_freno_elapsedMillis;
 
 // Otras variables de estado
 uint8_t programa_seleccionado;
@@ -401,6 +401,7 @@ void loop()
       digitalWrite(PIN_MOTOR_DEVANADOR, LOW);  // Desactivamos motor devanador
       sinceStart = 0;
       sinceStatus = 0;
+      sinceBrake = 0;
       if (tipo_parada == TIPO_PARADA_EMERGENCIA)
       {
         set_texto_fila_lcd(String("** ERROR P_") + (programa_seleccionado + 1), 0);
@@ -519,8 +520,7 @@ void activa_freno()
       Serial.println("* ACTIVANDO FRENO");
     digitalWrite(PIN_MOTOR_FRENO, HIGH);
     freno_activo = true;
-    sinceBrake = 0;
-    //activacion_freno_elapsedMillis = sinceBrake;
+    activacion_freno_elapsedMillis = sinceBrake;
   }
 }
 
@@ -530,8 +530,7 @@ void desactiva_freno()
     Serial.println("* DESACTIVANDO FRENO");
   digitalWrite(PIN_MOTOR_FRENO, LOW);
   freno_activo = false;
-  sinceBrake = 0;
-  //activacion_freno_elapsedMillis = 0;
+  activacion_freno_elapsedMillis = 0;
 }
 
 void comprueba_tiempo_de_frenado()
@@ -540,8 +539,7 @@ void comprueba_tiempo_de_frenado()
   {
     unsigned long tiempo_freno_activo;
 
-    //tiempo_freno_activo = sinceBrake - activacion_freno_elapsedMillis;
-    tiempo_freno_activo = sinceBrake;
+    tiempo_freno_activo = sinceBrake - activacion_freno_elapsedMillis;
     if (tiempo_freno_activo > TIEMPO_FRENADO_MS)
       desactiva_freno();
   }
@@ -656,6 +654,7 @@ void set_estado_marcha(bool desde_paro, uint16_t velocidadmov)
   hay_click_rotary_enc = false;
   sinceStart = 0;
   sinceStatus = 0;
+  sinceBrake = 0;
 
   myStepper.setSpeed(velocidadmov);     // Velocidad del devanador
   desactiva_freno();            // Desactivamos freno
@@ -670,16 +669,17 @@ void set_estado_paro_general(int tipo_entrada_en_paro, int pin_responsable_paro)
   {
     digitalWrite(LED_PLACA, LOW);               // Máquina en paro
     digitalWrite(PIN_MOTOR_VARIADOR, LOW);      // Desactivamos variador
+
     activa_freno();                 // Frenado instantáneo
 
     if (tipo_entrada_en_paro == TIPO_PARADA_FINALIZACION)
     {
       digitalWrite(PIN_MOTOR_DEVANADOR, LOW);   // Desactivamos motor devanador
 
-    // Frenado antes de selección:
-    proceso_de_freno_motor(programas[programa_seleccionado].num_periodos_freno);
-    sinceStart = 0;
-    sinceStatus = 0;
+      // Frenado antes de selección:
+      proceso_de_freno_motor(programas[programa_seleccionado].num_periodos_freno);
+      sinceStart = 0;
+      sinceStatus = 0;
     }
 
     // Set estado PARO
