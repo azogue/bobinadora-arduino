@@ -37,11 +37,21 @@
 //        - 2º vez para RESET de programa
 //
 // ---------------------------------------------------------------------------
+/*
+    Cambios 04/2017:
+
+    - [X] Edición de parámetros por cifras
+    - [X] Fusión de sensores de fallo.
+    - [ ] Cambio de PINs para trabajar con PLC Leonardo
+    - [X] Optimización memoria para PLC Leonardo
+    - [ ] Otros cambios para PLC Leonardo
+
+// ---------------------------------------------------------------------------
+*/
 
 //**********************************
 //** Librerías *********************
 //**********************************
-
 #include <ClickEncoder.h>
 #include <EEPROM.h>
 #include <elapsedMillis.h>
@@ -51,27 +61,21 @@
 #include <TimerOne.h>
 #include <Wire.h>
 
-
 //**********************************
-//** Definiciones ******************
+//** PINOUT ************************
 //**********************************
-
-// PINOUT
-#define PIN_BOTON_START           4           // Botón de START / REANUDACIÓN
-
 #define PIN_BOTON_PARO_RESET      3           // Botón de PARO / RESET  (Interrupt)
-#define PIN_FALLO_1               18          // Señal de Fallo 1 (Interrupt)
-#define PIN_FALLO_2               19          // Señal de Fallo 2 (Interrupt)
+#define PIN_FALLO_1_2             19          // Señal de Fallo 1 o 2 (input único) (Interrupt)
+
+#define PIN_BOTON_START           4           // Botón de START / REANUDACIÓN
+#define PIN_FIN_CARRERA_HOME      7           // Sensor de final de carrera Home
 
 #define PIN_ROTARY_ENC_CLK        A2
 #define PIN_ROTARY_ENC_DT         A1
 #define PIN_ROTARY_ENC_SW         A0
 
-#define PIN_FIN_CARRERA_HOME      7           // Sensor de final de carrera Home
-
 #define PIN_1_MOTOR_STEP          8           // Stepper PIN1
 #define PIN_2_MOTOR_STEP          9           // Stepper PIN2
-#define STEPS_MOTOR               200         // Stepper config.
 
 #define PIN_MOTOR_DEVANADOR       10          // Motor devanador
 #define PIN_MOTOR_VARIADOR        11          // Variador
@@ -79,8 +83,9 @@
 
 #define LED_PLACA                 13          // Simulando el encendido del motor, y/o como led de actividad
 
-
-// Variables de configuración de programa
+//**********************************
+//** Configuración *****************
+//**********************************
 #define VERBOSE                   true
 #define FORZAR_REGRABADO_DEFAULTS false       // Activando, se fuerza la re-escritura de los parámetros por defecto de los 10 programas
 
@@ -90,6 +95,7 @@
 #define DELAY_ENTRE_PARO_RESET_MS 5000        // Tiempo mínimo entre estado de PARO y RESET a modo SELECC, en ms
 #define TIEMPO_FRENADO_MS         4000        // Tiempo de activación del freno, en ms
 
+#define STEPS_MOTOR               200         // Stepper config.
 
 // Resto
 #define LCD_CHARS                 16
@@ -107,11 +113,9 @@
 
 #define CASEBREAK(label) case label: break;
 
-
 //**********************************
 //** Variables *********************
 //**********************************
-
 // Textos LCD
 const char* OPCIONES_PROGRAMA[] = {"- Num movs",
                                    "- Distanc. pasos",
@@ -151,7 +155,7 @@ config_prog_t programas[NUM_PROGRAMAS];
 // Contadores de tiempo
 elapsedMillis sinceStart;
 elapsedMillis sinceStatus;
-elapsedMillis sinceBrake;
+//elapsedMillis sinceBrake;
 
 // Variables 'volátiles' (se escriben en interrupciones)
 volatile uint8_t estado_general;
@@ -220,11 +224,9 @@ void setup_inputs()
 void setup_interrupts()
 {
   pinMode(PIN_BOTON_PARO_RESET, INPUT);
-  pinMode(PIN_FALLO_1, INPUT);
-  pinMode(PIN_FALLO_2, INPUT);
+  pinMode(PIN_FALLO_1_2, INPUT);
   attachInterrupt(digitalPinToInterrupt(PIN_BOTON_PARO_RESET), isr_set_estado_paro_o_reset_manual, RISING);
-  attachInterrupt(digitalPinToInterrupt(PIN_FALLO_1), isr_set_estado_paro_por_fallo_1, RISING);
-  attachInterrupt(digitalPinToInterrupt(PIN_FALLO_2), isr_set_estado_paro_por_fallo_2, RISING);
+  attachInterrupt(digitalPinToInterrupt(PIN_FALLO_1_2), isr_set_estado_paro_por_fallo, RISING);
 }
 
 void setup_motor_bobinadora()
@@ -401,7 +403,7 @@ void loop()
       digitalWrite(PIN_MOTOR_DEVANADOR, LOW);  // Desactivamos motor devanador
       sinceStart = 0;
       sinceStatus = 0;
-      sinceBrake = 0;
+      //sinceBrake = 0;
       if (tipo_parada == TIPO_PARADA_EMERGENCIA)
       {
         set_texto_fila_lcd(String("** ERROR P_") + (programa_seleccionado + 1), 0);
@@ -490,7 +492,7 @@ void ajuste_inicial_cabezal_bobinadora(uint16_t distanciaoffset)
 {
   if (VERBOSE)
   {
-    Serial.print("sensor_final_carrera: ");
+    Serial.print("s_finalcarrera: ");
     Serial.println(sensor_final_carrera);
   }
   sensor_final_carrera = digitalRead(PIN_FIN_CARRERA_HOME);
@@ -506,7 +508,7 @@ void ajuste_inicial_cabezal_bobinadora(uint16_t distanciaoffset)
   // Una vez tenemos el devanador en el home lo llevamos a su distancia offset
   if (VERBOSE)
   {
-    Serial.print("Avanzando Offset: ");
+    Serial.print("Avanza Offset: ");
     Serial.println(-distanciaoffset);
   }
   myStepper.step(-distanciaoffset);
@@ -517,17 +519,17 @@ void activa_freno()
   if (!freno_activo) // Para activarlo una única vez
   {
     if (VERBOSE)
-      Serial.println("* ACTIVANDO FRENO");
+      Serial.println("* FRENO ON");
     digitalWrite(PIN_MOTOR_FRENO, HIGH);
     freno_activo = true;
-    activacion_freno_elapsedMillis = sinceBrake;
+    activacion_freno_elapsedMillis = sinceStart;
   }
 }
 
 void desactiva_freno()
 {
   if (VERBOSE)
-    Serial.println("* DESACTIVANDO FRENO");
+    Serial.println("* FRENO OFF");
   digitalWrite(PIN_MOTOR_FRENO, LOW);
   freno_activo = false;
   activacion_freno_elapsedMillis = 0;
@@ -539,7 +541,7 @@ void comprueba_tiempo_de_frenado()
   {
     unsigned long tiempo_freno_activo;
 
-    tiempo_freno_activo = sinceBrake - activacion_freno_elapsedMillis;
+    tiempo_freno_activo = sinceStart - activacion_freno_elapsedMillis;
     if (tiempo_freno_activo > TIEMPO_FRENADO_MS)
       desactiva_freno();
   }
@@ -560,7 +562,7 @@ void cuenta_vueltas_motor(uint16_t distanciamov, uint16_t velocidadmov, uint16_t
     sinceStart = 0;
     if (VERBOSE)
     {
-      Serial.print("Distancia movimiento step: ");
+      Serial.print("Distancia mov step: ");
       Serial.print((int)distanciamov * signo);
       Serial.print("; VUELTA n=");
       Serial.print(contador_vueltas_motor);
@@ -575,7 +577,7 @@ void cuenta_vueltas_motor(uint16_t distanciamov, uint16_t velocidadmov, uint16_t
   {
     if (VERBOSE)
     {
-      Serial.print("TERMINA CORRECTAMENTE PROGRAMA_");
+      Serial.print("END OK PROGRAMA_");
       Serial.println(programa_seleccionado + 1);
     }
     set_estado_paro_por_finalizacion();
@@ -654,7 +656,7 @@ void set_estado_marcha(bool desde_paro, uint16_t velocidadmov)
   hay_click_rotary_enc = false;
   sinceStart = 0;
   sinceStatus = 0;
-  sinceBrake = 0;
+  //sinceBrake = 0;
 
   myStepper.setSpeed(velocidadmov);     // Velocidad del devanador
   desactiva_freno();            // Desactivamos freno
@@ -670,6 +672,10 @@ void set_estado_paro_general(int tipo_entrada_en_paro, int pin_responsable_paro)
     digitalWrite(LED_PLACA, LOW);               // Máquina en paro
     digitalWrite(PIN_MOTOR_VARIADOR, LOW);      // Desactivamos variador
 
+    /* TODO aclarar funcionamiento del frenado:
+    Se está haciendo un frenado instantáneo en la entrada en paro, para después
+    llamar a proceso_de_freno_motor que espera 4 seg antes de frenar ¿¿??
+    */
     activa_freno();                 // Frenado instantáneo
 
     if (tipo_entrada_en_paro == TIPO_PARADA_FINALIZACION)
@@ -689,16 +695,10 @@ void set_estado_paro_general(int tipo_entrada_en_paro, int pin_responsable_paro)
   }
 }
 
-void isr_set_estado_paro_por_fallo_1()
+void isr_set_estado_paro_por_fallo()
 {
-  // PARO del programa con sensor FALLO_1
-  set_estado_paro_general(TIPO_PARADA_EMERGENCIA, PIN_FALLO_1);
-}
-
-void isr_set_estado_paro_por_fallo_2()
-{
-  // PARO del programa con sensor FALLO_2
-  set_estado_paro_general(TIPO_PARADA_EMERGENCIA, PIN_FALLO_2);
+  // PARO del programa con sensor FALLO_1 ó FALLO_2
+  set_estado_paro_general(TIPO_PARADA_EMERGENCIA, PIN_FALLO_1_2);
 }
 
 void isr_set_estado_paro_o_reset_manual()
@@ -803,7 +803,7 @@ void configuracion_parametros_programa_actual()
 
   if (VERBOSE)
   {
-    Serial.print('Entrando en modo configuracion del P_');
+    Serial.print("--> modo config de P_");
     Serial.println(programa_seleccionado + 1);
     print_config_programa(programa_seleccionado);
   }
@@ -832,31 +832,31 @@ void configuracion_parametros_programa_actual()
           switch (variable_seleccionada)
           {
             case 0:
-              hay_cambio_valor = edicion_variable_con_rotary_encoder(String(OPCIONES_PROGRAMA_CORTAS[variable_seleccionada]),
-                                                                     &programa_edit.numero_movimientos,
-                                                                     OPCIONES_RANGO_MIN[variable_seleccionada], OPCIONES_RANGO_MAX[variable_seleccionada], 1.);
+              hay_cambio_valor = edicion_variable_por_cifras(String(OPCIONES_PROGRAMA_CORTAS[variable_seleccionada]),
+                                                             &programa_edit.numero_movimientos,
+                                                             OPCIONES_RANGO_MIN[variable_seleccionada], OPCIONES_RANGO_MAX[variable_seleccionada], 1.);
               break;
             case 1:
-              hay_cambio_valor = edicion_variable_con_rotary_encoder(String(OPCIONES_PROGRAMA_CORTAS[variable_seleccionada]),
-                                                                     &programa_edit.distancia_movimiento_num_pasos,
-                                                                     OPCIONES_RANGO_MIN[variable_seleccionada], OPCIONES_RANGO_MAX[variable_seleccionada], 1.);
+              hay_cambio_valor = edicion_variable_por_cifras(String(OPCIONES_PROGRAMA_CORTAS[variable_seleccionada]),
+                                                             &programa_edit.distancia_movimiento_num_pasos,
+                                                             OPCIONES_RANGO_MIN[variable_seleccionada], OPCIONES_RANGO_MAX[variable_seleccionada], 1.);
               break;
             case 2:
-              hay_cambio_valor = edicion_variable_con_rotary_encoder(String(OPCIONES_PROGRAMA_CORTAS[variable_seleccionada]),
-                                                                     &programa_edit.velocidad_movimiento_rpm,
-                                                                     OPCIONES_RANGO_MIN[variable_seleccionada], OPCIONES_RANGO_MAX[variable_seleccionada], 1.);
+              hay_cambio_valor = edicion_variable_por_cifras(String(OPCIONES_PROGRAMA_CORTAS[variable_seleccionada]),
+                                                             &programa_edit.velocidad_movimiento_rpm,
+                                                             OPCIONES_RANGO_MIN[variable_seleccionada], OPCIONES_RANGO_MAX[variable_seleccionada], 1.);
               break;
             case 3:
-              hay_cambio_valor = edicion_variable_con_rotary_encoder(String(OPCIONES_PROGRAMA_CORTAS[variable_seleccionada]),
-                                                                     &programa_edit.num_periodos_freno,
-                                                                     OPCIONES_RANGO_MIN[variable_seleccionada], OPCIONES_RANGO_MAX[variable_seleccionada], PERIODO_FRENO_SEG);
+              hay_cambio_valor = edicion_variable_por_cifras(String(OPCIONES_PROGRAMA_CORTAS[variable_seleccionada]),
+                                                             &programa_edit.num_periodos_freno,
+                                                             OPCIONES_RANGO_MIN[variable_seleccionada], OPCIONES_RANGO_MAX[variable_seleccionada], PERIODO_FRENO_SEG);
               break;
             case 4:
-              hay_cambio_valor = edicion_variable_con_rotary_encoder(String(OPCIONES_PROGRAMA_CORTAS[variable_seleccionada]),
-                                                                     &programa_edit.distancia_offset_num_pasos,
-                                                                     OPCIONES_RANGO_MIN[variable_seleccionada], OPCIONES_RANGO_MAX[variable_seleccionada], 1.);
+              hay_cambio_valor = edicion_variable_por_cifras(String(OPCIONES_PROGRAMA_CORTAS[variable_seleccionada]),
+                                                             &programa_edit.distancia_offset_num_pasos,
+                                                             OPCIONES_RANGO_MIN[variable_seleccionada], OPCIONES_RANGO_MAX[variable_seleccionada], 1.);
               break;
-          }
+            }
           if (hay_cambio_valor)
           {
             programa_modificado = true;
@@ -865,9 +865,9 @@ void configuracion_parametros_programa_actual()
           }
           if (VERBOSE)
           {
-            Serial.print("Saliendo de edición de valor. Hay cambios? ");
+            Serial.print("EXIT EDIT VAR. Changes? ");
             Serial.println(hay_cambio_valor);
-            Serial.print("; programa_modificado? ");
+            Serial.print("; prog modified? ");
             Serial.println(programa_modificado);
             print_config_programa(programa_seleccionado);
           }
@@ -878,7 +878,7 @@ void configuracion_parametros_programa_actual()
         {
           if (VERBOSE)
           {
-            Serial.print('Saliendo del modo configuracion del P_');
+            Serial.print("Exiting config mode of P_");
             Serial.println(programa_seleccionado + 1);
             print_config_programa(programa_seleccionado);
           }
@@ -900,41 +900,89 @@ void configuracion_parametros_programa_actual()
     delay(300);
   }
 }
-
-bool edicion_variable_con_rotary_encoder(String ref_variable, uint16_t *valor_edit, uint16_t valor_min, uint16_t valor_max, float factor_conv_variable)
+const char *i_text_variation_order_mag(uint8_t order_mag)
 {
-  // Loop hasta que se selecciona valor con click o doble click:
-  //String nombre_var = ref_variable.substring(2);
-  String nombre_var = ref_variable;
-  int valor_encoder;
-
-  int valor_ant = *valor_edit;
-  int valor = valor_ant;
-  int last_valor = valor_ant;
-
-  //Serial.println("Entrando en config var=" + nombre_var);
-  (void)rotary_encoder->getValue();
-  hay_doble_click_rotary_enc = false;
-  set_texto_lcd(String("* Configurando:"), String(nombre_var + " (" + (valor_ant * factor_conv_variable) + ")"));
-  delay(DELAY_MS_CMD_MENU / 2);
-  set_texto_lcd(String(nombre_var + " (" + (valor_ant * factor_conv_variable) + ")"), String("- <--> + :  ") + (valor * factor_conv_variable));
-  while (!hay_doble_click_rotary_enc & !hay_click_rotary_enc)
+  switch (order_mag)
   {
-    valor_encoder = rotary_encoder->getValue();
-    //if (abs(valor_encoder) > 0)
-    //  Serial.println(valor_encoder * factor_conv_variable);
-    valor += valor_encoder;
-    if (valor != last_valor)
-    {
-      if (valor < valor_min)
-        valor = valor_min;
-      else if (valor > valor_max)
-        valor = valor_max;
-      set_texto_fila_lcd(String("- <--> + :  ") + (valor * factor_conv_variable), 1);
-    }
-    last_valor = valor;
+    case 0:
+      return "   - 1 +: ";
+    case 1:
+      return "  - 10 +: ";
+    case 2:
+      return " - 100 +: ";
+    case 3:
+      return "- 1000 +: ";
+    case 4:
+      return "-10000 +: ";
+  }
+}
 
+void i_trim_number(uint16_t valor, float factor_conv_variable,
+                   uint8_t pos_cifra, uint8_t order_max,
+                   uint8_t *cifra,
+                   String *tnum_before, String *tnum_after,
+                   String *opc_before, String *opc_after)
+{
+  String text_value = String((valor * factor_conv_variable)/ pow(10., order_max), order_max);
+
+  *tnum_before = String(text_value.substring(2, 2 + order_max - pos_cifra - 1));
+  *tnum_after = String(text_value.substring(2 + order_max - pos_cifra));
+  *cifra = text_value.substring(1 + order_max - pos_cifra, 2 + order_max - pos_cifra).toInt();
+  if (opc_before != NULL)
+    //*opc_before = String("+-(10^" + String(pos_cifra) + "): " + *tnum_before + "_");
+    *opc_before = String(i_text_variation_order_mag(pos_cifra) + *tnum_before + "_");
+  if (opc_after != NULL)
+    *opc_after = String("_" + *tnum_after);
+
+  /*if (VERBOSE)
+  {
+    Serial.print("** DEBUG TRIM. Pos:");
+    Serial.print(pos_cifra);
+    Serial.print(", Cifra: ");
+    Serial.print(*cifra);
+    Serial.print(", tnum_before: ");
+    Serial.print(*tnum_before);
+    Serial.print(", tnum_after: ");
+    Serial.println(*tnum_after);
+  }*/
+}
+
+bool edicion_variable_por_cifras(String ref_variable, uint16_t *valor_edit, uint16_t valor_min, uint16_t valor_max, float factor_conv_variable)
+{
+  // Separación de la variable a editar por cifras separadas (# dependiente del rango). Se comienza a editar la cifra de unidades (drcha),
+  // y, mediante *clicks del encoder*, se va cambiando de cifra. Para salir con el nuevo valor, *doble click* del encoder*
+  bool hay_cambio, hay_doble_click_rotary_enc;
+  String before, after, text_value, tnum_before, tnum_after;
+  uint8_t pos_cifra, order_max, cifra;
+  int valor_ant = (int)(*valor_edit * factor_conv_variable);
+  int valor = valor_ant;
+
+  sinceStart = 0;
+  pos_cifra = 0;
+  order_max = (uint8_t)ceil(log10(valor_max));
+  i_trim_number(valor, factor_conv_variable, pos_cifra, order_max,
+                &cifra, &tnum_before, &tnum_after, &before, &after);
+
+  (void)rotary_encoder->getValue();
+  hay_cambio = false;
+  hay_doble_click_rotary_enc = false;
+
+  //set_texto_lcd(String("* Configurando:"), String(ref_variable + " (" + valor_ant + ")"));
+  set_texto_lcd(String(ref_variable + " (" + valor_ant + ")"), String("- <--> + :  ") + valor);
+  delay(DELAY_MS_CMD_MENU / 2);
+
+  set_texto_fila_lcd(String(before + String(cifra) + after), 1);
+  while (!hay_doble_click_rotary_enc)  // Salida de edición por cifras mediante doble click
+  {
     ClickEncoder::Button b = rotary_encoder->getButton();
+    hay_cambio = i_hay_cambio_unitario_rotary_encoder(&cifra, 9);
+    if (hay_cambio)
+    {
+      valor = String(tnum_before + String(cifra) + tnum_after).toInt();
+      //Serial.println(String("NEW --> ") + String(valor) + String(", -> ") + tnum_before + String(" + ") + String(cifra) + String(" + ") + tnum_after);
+      set_texto_fila_lcd(String(before + String(cifra) + after), 1);
+    }
+
     if (b != ClickEncoder::Open)
     {
       switch (b)
@@ -943,25 +991,48 @@ bool edicion_variable_con_rotary_encoder(String ref_variable, uint16_t *valor_ed
         CASEBREAK(ClickEncoder::Held);
         CASEBREAK(ClickEncoder::Released);
         case ClickEncoder::Clicked:
-          hay_click_rotary_enc = true;
-          break;
+          // Rotación de cifra
+          if (pos_cifra + 1 < order_max)
+            pos_cifra += 1;
+          else
+            pos_cifra = 0;
+          i_trim_number(valor, factor_conv_variable, pos_cifra, order_max,
+                        &cifra, &tnum_before, &tnum_after, &before, &after);
+          //Serial.println(String("ROTACION CIFRA_CLICK --> ") + String(valor) + String(", -> ") + tnum_before + String(" + ") + String(cifra) + String(" + ") + tnum_after);
+          set_texto_fila_lcd(String(before + String(cifra) + after), 1);
+          //break;
         case ClickEncoder::DoubleClicked:
+          //Serial.println(String("SALIDA DBLCLICK --> ") + String(valor) + String(", -> ") + tnum_before + String(" + ") + String(cifra) + String(" + ") + tnum_after);
           hay_doble_click_rotary_enc = true;
           break;
       }
     }
-    // Para no avanzar demasiado por paso! --> TODO Mejorar con el sistema de aceleración
-    delay(200);
-  }
-  //set_texto_lcd(String("** Guardado"), String("--> PROGRAMA ") + (programa_seleccionado + 1));
-  set_texto_fila_lcd(String("Se acepta: ") + (valor * factor_conv_variable), 1);
 
+    // Salida por tiempo máximo de edición TODO Revisión de validez
+    if (sinceStart > 35000)
+      hay_doble_click_rotary_enc = true;
+
+    // Para frenar el rotary en la edición por cifras
+    delay(300);
+  }
+  if (valor < valor_min)
+    valor = valor_min;
+  else if (valor > valor_max)
+    valor = valor_max;
+
+  set_texto_fila_lcd(String("Se acepta: ") + (int)(valor / factor_conv_variable), 1);
   delay(DELAY_MS_CMD_MENU / 2);
   hay_doble_click_rotary_enc = false;
-  hay_click_rotary_enc = false;
   if (valor != valor_ant)
   {
-    *valor_edit = valor;
+    /*if (VERBOSE)
+    {
+      Serial.print("Saliendo de edición por cifras con cambios: ");
+      Serial.print(valor_ant);
+      Serial.print(" --> ");
+      Serial.println(valor);
+    }*/
+    *valor_edit = (uint16_t)(valor / factor_conv_variable);
     return true;
   }
   return false;
@@ -987,14 +1058,19 @@ String i_time_string(float millis)
   return String(millis / 1000., 1);
 }
 
+static inline int8_t i_signo(int val)
+{
+  if (val < 0) return -1;
+  if (val == 0) return 0;
+  return 1;
+}
+
 bool i_hay_cambio_unitario_rotary_encoder(uint8_t *variable_edit, uint16_t valor_max)
 {
-  int valor_encoder = rotary_encoder->getValue();
-  if (abs(valor_encoder) > 1)
-    valor_encoder /= abs(valor_encoder);
-  if ((abs(valor_encoder) > 0) & (((*variable_edit > 0) & (valor_encoder == -1)) | ((*variable_edit < valor_max) & (valor_encoder == 1))))
+  int signo_cambio = i_signo(rotary_encoder->getValue());
+  if (((signo_cambio > 0) & (*variable_edit < valor_max)) | ((signo_cambio < 0) & (*variable_edit >= 0)))
   {
-    *variable_edit += valor_encoder;
+    *variable_edit += signo_cambio;
     return true;
   }
   return false;
@@ -1009,7 +1085,7 @@ bool i_sube_flanco(int estado_ant, int new_estado)
 
 void i_print_config_programa(uint8_t indice_programa, const config_prog_t conf_print)
 {
-  Serial.print("PROGRAMA_");
+  Serial.print("PROG_");
   Serial.print(indice_programa + 1);
   Serial.print(": MOVS=");
   Serial.print(conf_print.numero_movimientos);
