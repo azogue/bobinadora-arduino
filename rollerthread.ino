@@ -40,14 +40,50 @@
 /*
     Cambios 04/2017:
 
-    - [X] Edición de parámetros por cifras
+    - [X] Cambio de PINs para trabajar con PLC Leonardo
+    - [X] Edicion de parámetros por cifras
     - [X] Fusión de sensores de fallo.
-    - [ ] Cambio de PINs para trabajar con PLC Leonardo
+    - [X] Separación de frenos.
+    - [X] Switch para usar LCD / monitor serie
     - [X] Optimización memoria para PLC Leonardo
+    - [ ] LCD por spi
+    - [ ] Modificación de frenado para comenzar a frenar ∆T antes de finalización de programa
     - [ ] Otros cambios para PLC Leonardo
 
 // ---------------------------------------------------------------------------
+
+# USO DE MEMORIA en Placa Arduino Leonardo
+  - El espacio de almacenamiento de programa máximo es 28672 bytes.
+  - La memoria es de 2560 bytes.
+
+* Sin LCD, sin VERBOSE: (serial imita al LCD)
+  El Sketch usa 21708 bytes (75%) del espacio de almacenamiento de programa.
+  Las variables Globales usan 1126 bytes (43%) de la memoria dinámica, dejando 1434 bytes para las variables locales.
+
+* Sin LCD, con VERBOSE: (serial imita al LCD + debug info)
+  El Sketch usa 24418 bytes (85%) del espacio de almacenamiento de programa.
+  Las variables Globales usan 1956 bytes (76%) de la memoria dinámica, dejando 604 bytes para las variables locales.
+  Poca memoria disponible, se pueden producir problemas de estabilidad.
+
+* Con LCD, con VERBOSE: (debug info)
+  El Sketch usa 25922 bytes (90%) del espacio de almacenamiento de programa.
+  Las variables Globales usan 1950 bytes (76%) de la memoria dinámica, dejando 610 bytes para las variables locales.
+  Poca memoria disponible, se pueden producir problemas de estabilidad.
+
+* Con LCD, sin VERBOSE (production mode):
+  El Sketch usa 22902 bytes (79%) del espacio de almacenamiento de programa.
+  Las variables Globales usan 1118 bytes (43%) de la memoria dinámica, dejando 1442 bytes para las variables locales.
+
 */
+
+//**********************************
+//** FLAGS *************************
+//**********************************
+// Switch para mostrar info en Serial
+//#define VERBOSE
+
+// Switch para usar LCD 2x16 (vs Serial)
+//#define USE_LCD
 
 //**********************************
 //** Librerías *********************
@@ -55,44 +91,47 @@
 #include <ClickEncoder.h>
 #include <EEPROM.h>
 #include <elapsedMillis.h>
-#include <LCD.h>
-#include <LiquidCrystal_I2C.h>  // F Malpartida's NewLiquidCrystal library
 #include <Stepper.h>
 #include <TimerOne.h>
 #include <Wire.h>
+#ifdef USE_LCD
+  #include <LCD.h>
+  #include <LiquidCrystal_I2C.h>  // F Malpartida's NewLiquidCrystal library
+#endif
 
 //**********************************
 //** PINOUT ************************
 //**********************************
-#define PIN_BOTON_PARO_RESET      3           // Botón de PARO / RESET  (Interrupt)
-#define PIN_FALLO_1_2             19          // Señal de Fallo 1 o 2 (input único) (Interrupt)
+#define PIN_BOTON_PARO_RESET      0    // 3           // Botón de PARO / RESET  (Interrupt)
+#define PIN_FALLO_1_2             1  // 19          // Señal de Fallo 1 o 2 (input único) (Interrupt)
 
-#define PIN_BOTON_START           4           // Botón de START / REANUDACIÓN
-#define PIN_FIN_CARRERA_HOME      7           // Sensor de final de carrera Home
+#define PIN_BOTON_START           A3   // 4           // Botón de START / REANUDACIÓN
+#define PIN_FIN_CARRERA_HOME      A4   // 7           // Sensor de final de carrera Home
 
-#define PIN_ROTARY_ENC_CLK        A2
-#define PIN_ROTARY_ENC_DT         A1
-#define PIN_ROTARY_ENC_SW         A0
+#define PIN_ROTARY_ENC_CLK        A2  // A2
+#define PIN_ROTARY_ENC_DT         A1  // A1
+#define PIN_ROTARY_ENC_SW         A0  // A0
 
-#define PIN_1_MOTOR_STEP          8           // Stepper PIN1
-#define PIN_2_MOTOR_STEP          9           // Stepper PIN2
+#define PIN_1_MOTOR_STEP          2   // 8           // Stepper PIN1
+#define PIN_2_MOTOR_STEP          3   // 9           // Stepper PIN2
 
-#define PIN_MOTOR_DEVANADOR       10          // Motor devanador
-#define PIN_MOTOR_VARIADOR        11          // Variador
-#define PIN_MOTOR_FRENO           12          // Freno
+#define PIN_MOTOR_DEVANADOR       9  // 10          // Motor devanador (enable driver)
+#define PIN_MOTOR_VARIADOR        8  // 11          // Variador
+#define PIN_MOTOR_FRENO_1         4  // 12          // Freno 1
+#define PIN_MOTOR_FRENO_2         7                 // Freno 2
 
-#define LED_PLACA                 13          // Simulando el encendido del motor, y/o como led de actividad
+#define LED_PLACA                 13  // 13          // Simulando el encendido del motor, y/o como led de actividad
 
 //**********************************
 //** Configuración *****************
 //**********************************
-#define VERBOSE                   true
 #define FORZAR_REGRABADO_DEFAULTS false       // Activando, se fuerza la re-escritura de los parámetros por defecto de los 10 programas
 
 #define NUM_PROGRAMAS             10
 #define NUM_OPCIONES              5
-#define DELAY_MS_CMD_MENU         500         // Delay en navegación en estados de edición, para mostrar mensajes breves en el LCD, en ms
+#define DELAY_MS_CMD_MENU         500         // Delay en navegación en estados de edicion, para mostrar mensajes breves en el LCD, en ms
 #define DELAY_ENTRE_PARO_RESET_MS 5000        // Tiempo mínimo entre estado de PARO y RESET a modo SELECC, en ms
+#define DELAY_TIMEOUT_EDIT_VAR_MS 10000       // Tiempo de standby antes de la aceptación automática del valor editado.
 #define TIEMPO_FRENADO_MS         4000        // Tiempo de activación del freno, en ms
 
 #define STEPS_MOTOR               200         // Stepper config.
@@ -174,7 +213,9 @@ uint8_t estadoBoton_start = 0;
 uint8_t estadoBotonLast_start = 0;
 
 // LCD
-LiquidCrystal_I2C lcd( 0x3F, 2,   1,  0,  4,  5,  6,  7, 3, POSITIVE);
+#ifdef USE_LCD
+  LiquidCrystal_I2C lcd( 0x3F, 2,   1,  0,  4,  5,  6,  7, 3, POSITIVE);
+#endif
 
 // Rotary encoder
 ClickEncoder *rotary_encoder;
@@ -198,7 +239,9 @@ void setup()
 {
   Serial.begin(9600);
   setup_rotary_encoder();
+#ifdef USE_LCD
   setup_lcd();
+#endif
   setup_motor_bobinadora();
   setup_configuraciones_programa();
   setup_inputs();
@@ -235,7 +278,8 @@ void setup_motor_bobinadora()
 
   pinMode(PIN_MOTOR_DEVANADOR, OUTPUT);   // Enable Motor Devanador
   pinMode(PIN_MOTOR_VARIADOR, OUTPUT);    // Relé Variador
-  pinMode(PIN_MOTOR_FRENO, OUTPUT);     // Relé Freno
+  pinMode(PIN_MOTOR_FRENO_1, OUTPUT);     // Relé Freno
+  pinMode(PIN_MOTOR_FRENO_2, OUTPUT);     // Relé Freno
 
   // Apagando motores al inicio
   desactiva_freno();              // Desactivamos freno
@@ -246,12 +290,14 @@ void setup_motor_bobinadora()
   i_reset_direccion_devanador();
 }
 
+#ifdef USE_LCD
 void setup_lcd()
 {
   lcd.begin(LCD_CHARS, LCD_LINES);
   lcd.setBacklight(HIGH); // Activamos la retroiluminacion
   lcd.clear();
 }
+#endif
 
 void setup_rotary_encoder()
 {
@@ -268,34 +314,35 @@ void setup_configuraciones_programa()
   int eeAddress = 0;
 
   EEPROM.get(eeAddress, es_primer_inicio);
-  if (VERBOSE)
-  {
-    Serial.print("es_primer_inicio: ");
-    Serial.println(es_primer_inicio);
-  }
+
+#ifdef VERBOSE
+  Serial.print("es_primer_inicio: ");
+  Serial.println(es_primer_inicio);
+#endif
   if (es_primer_inicio | FORZAR_REGRABADO_DEFAULTS)
   {
-    if (VERBOSE)
-      Serial.println("Se procede a grabar la EEPROM con los programas por defecto");
+#ifdef VERBOSE
+    Serial.println("Se procede a grabar la EEPROM con los programas por defecto");
+#endif
     eeAddress += sizeof(bool);
-    eeAddress = eeprom_write_config_defecto(eeAddress, 0, VALORES_DEFECTO_P1, VERBOSE);
-    eeAddress = eeprom_write_config_defecto(eeAddress, 1, VALORES_DEFECTO_P2, VERBOSE);
-    eeAddress = eeprom_write_config_defecto(eeAddress, 2, VALORES_DEFECTO_P3, VERBOSE);
-    eeAddress = eeprom_write_config_defecto(eeAddress, 3, VALORES_DEFECTO_P4, VERBOSE);
-    eeAddress = eeprom_write_config_defecto(eeAddress, 4, VALORES_DEFECTO_P5, VERBOSE);
-    eeAddress = eeprom_write_config_defecto(eeAddress, 5, VALORES_DEFECTO_P6, VERBOSE);
-    eeAddress = eeprom_write_config_defecto(eeAddress, 6, VALORES_DEFECTO_P7, VERBOSE);
-    eeAddress = eeprom_write_config_defecto(eeAddress, 7, VALORES_DEFECTO_P8, VERBOSE);
-    eeAddress = eeprom_write_config_defecto(eeAddress, 8, VALORES_DEFECTO_P9, VERBOSE);
-    eeAddress = eeprom_write_config_defecto(eeAddress, 9, VALORES_DEFECTO_P10, VERBOSE);
+    eeAddress = eeprom_write_config_defecto(eeAddress, 0, VALORES_DEFECTO_P1);
+    eeAddress = eeprom_write_config_defecto(eeAddress, 1, VALORES_DEFECTO_P2);
+    eeAddress = eeprom_write_config_defecto(eeAddress, 2, VALORES_DEFECTO_P3);
+    eeAddress = eeprom_write_config_defecto(eeAddress, 3, VALORES_DEFECTO_P4);
+    eeAddress = eeprom_write_config_defecto(eeAddress, 4, VALORES_DEFECTO_P5);
+    eeAddress = eeprom_write_config_defecto(eeAddress, 5, VALORES_DEFECTO_P6);
+    eeAddress = eeprom_write_config_defecto(eeAddress, 6, VALORES_DEFECTO_P7);
+    eeAddress = eeprom_write_config_defecto(eeAddress, 7, VALORES_DEFECTO_P8);
+    eeAddress = eeprom_write_config_defecto(eeAddress, 8, VALORES_DEFECTO_P9);
+    eeAddress = eeprom_write_config_defecto(eeAddress, 9, VALORES_DEFECTO_P10);
     EEPROM.put(0, false);  //Marca de configuración existente, para no sobreescribir en cada reinicio
   }
 
   //Lectura de configuraciones:
-  eeprom_read_configuraciones(VERBOSE);
+  eeprom_read_configuraciones();
 }
 
-void eeprom_read_configuraciones(bool verbose_mode)
+void eeprom_read_configuraciones()
 {
   int eeAddress = sizeof(bool);
   for (int i=0; i < NUM_PROGRAMAS; i++)
@@ -305,17 +352,16 @@ void eeprom_read_configuraciones(bool verbose_mode)
     EEPROM.get(eeAddress, conf_i);
     programas[i] = conf_i;
     eeAddress += eeAddressDelta;
-    if (verbose_mode)
-    {
-      Serial.print("Leido PROGRAMA ");
-      Serial.print(i + 1);
-      Serial.println(" desde EEPROM:");
-      print_config_programa(i);
-    }
+#ifdef VERBOSE
+    Serial.print("Leido PROGRAMA ");
+    Serial.print(i + 1);
+    Serial.println(" desde EEPROM:");
+    print_config_programa(i);
+#endif
   }
 }
 
-int eeprom_write_config_defecto(int eeAddress, int indice_programa, const uint16_t* valores_programa, bool verbose_mode)
+int eeprom_write_config_defecto(int eeAddress, int indice_programa, const uint16_t* valores_programa)
 {
   config_prog_t conf_i;
 
@@ -328,14 +374,13 @@ int eeprom_write_config_defecto(int eeAddress, int indice_programa, const uint16
   EEPROM.put(eeAddress, conf_i);
   eeAddress += eeAddressDelta;
 
-  if (verbose_mode)
-  {
-    Serial.print("Se graba PROGRAMA ");
-    Serial.print(indice_programa + 1);
-    Serial.println(" en EEPROM: ");
-    i_print_config_programa(indice_programa, conf_i);
-    Serial.println("");
-  }
+#ifdef VERBOSE
+  Serial.print("Se graba PROGRAMA ");
+  Serial.print(indice_programa + 1);
+  Serial.println(" en EEPROM: ");
+  i_print_config_programa(indice_programa, conf_i);
+  Serial.println("");
+#endif
   return eeAddress;
 }
 
@@ -352,18 +397,16 @@ void loop()
 {
   comprueba_tiempo_de_frenado();
   read_start_button();
-
   // Modos de funcionamiento: CONFIG / SELEC / MARCHA / RESET / PARO
 
   // Inicio de programa seleccionado
   if ((estado_general == STATE_SELECC) & (i_sube_flanco(estadoBotonLast_start, estadoBoton_start)))
   {
     set_texto_lcd(String("* RUNNING P_") + (programa_seleccionado + 1), String("Starting..."));
-    if (VERBOSE)
-    {
-      Serial.print("Comienza el PROGRAMA ");
-      Serial.println(programa_seleccionado + 1);
-    }
+#ifdef VERBOSE
+    Serial.print("Comienza el PROGRAMA ");
+    Serial.println(programa_seleccionado + 1);
+#endif
     set_estado_marcha(false, programas[programa_seleccionado].velocidad_movimiento_rpm);
   }
   // Aguarda cambio de programa o entrada a configuración de programa mediante rotary encoder
@@ -371,7 +414,7 @@ void loop()
   {
     seleccion_programa();
   }
-  // Modo de edición de variables del programa seleccionado
+  // Modo de edicion de variables del programa seleccionado
   else if (estado_general == STATE_CONFIG)
   {
     configuracion_parametros_programa_actual();
@@ -387,11 +430,10 @@ void loop()
   {
     // Reset del programa seleccionado
     set_texto_fila_lcd(String("** RESET P_") + (programa_seleccionado + 1), 0);
-    if (VERBOSE)
-    {
-      Serial.print("Se resetea el PROGRAMA_");
-      Serial.println(programa_seleccionado + 1);
-    }
+#ifdef VERBOSE
+    Serial.print("Se resetea el PROGRAMA_");
+    Serial.println(programa_seleccionado + 1);
+#endif
     delay(DELAY_MS_CMD_MENU);
     set_estado_seleccion();
   }
@@ -407,41 +449,40 @@ void loop()
       if (tipo_parada == TIPO_PARADA_EMERGENCIA)
       {
         set_texto_fila_lcd(String("** ERROR P_") + (programa_seleccionado + 1), 0);
-        if (VERBOSE)
-        {
-          Serial.print("** PARADA DE EMERGENCIA del PROGRAMA_");
-          Serial.println(programa_seleccionado + 1);
-        }
+#ifdef VERBOSE
+        Serial.print("** PARADA DE EMERGENCIA del PROGRAMA_");
+        Serial.println(programa_seleccionado + 1);
+#endif
       }
       else
       {
         set_texto_fila_lcd(String("** STOP P_") + (programa_seleccionado + 1), 0);
-        if (VERBOSE)
-        {
-          Serial.print("** PARADA MANUAL del PROGRAMA_");
-          Serial.println(programa_seleccionado + 1);
-        }
+#ifdef VERBOSE
+        Serial.print("** PARADA MANUAL del PROGRAMA_");
+        Serial.println(programa_seleccionado + 1);
+#endif
       }
       tipo_parada = TIPO_PARADA_FINALIZACION;
     }
 
+#ifdef VERBOSE
     // Para depurar sensores de fallo:
-    if (VERBOSE && pin_fallo != -1)
+    if (pin_fallo != -1)
     {
       Serial.print("** Entrada en PARO por activacion de sensor en PIN: ");
       Serial.println(pin_fallo);
       pin_fallo = -1;
     }
+#endif
 
     // Reanudación del programa seleccionado
     if (i_sube_flanco(estadoBotonLast_start, estadoBoton_start))
     {
       set_texto_lcd(String("* RE-RUN P_") + (programa_seleccionado + 1), String("En paro: ") + i_time_string(sinceStart));
-      if (VERBOSE)
-      {
-        Serial.print("Se reanuda el PROGRAMA ");
-        Serial.println(programa_seleccionado + 1);
-      }
+#ifdef VERBOSE
+      Serial.print("Se reanuda el PROGRAMA ");
+      Serial.println(programa_seleccionado + 1);
+#endif
       delay(DELAY_MS_CMD_MENU);
       set_estado_marcha(true, programas[programa_seleccionado].velocidad_movimiento_rpm);
     }
@@ -471,12 +512,14 @@ void vuelca_nueva_config_programa(uint8_t indice_programa, const config_prog_t n
   programas[indice_programa].distancia_offset_num_pasos = nueva_config.distancia_offset_num_pasos;
 }
 
+#ifdef VERBOSE
 void print_config_programa(uint8_t indice_programa)
 {
   config_prog_t conf_print;
   conf_print = programas[indice_programa];
   i_print_config_programa(indice_programa, conf_print);
 }
+#endif
 
 void read_start_button()
 {
@@ -490,11 +533,10 @@ void update_last_state_start_button()
 
 void ajuste_inicial_cabezal_bobinadora(uint16_t distanciaoffset)
 {
-  if (VERBOSE)
-  {
-    Serial.print("s_finalcarrera: ");
-    Serial.println(sensor_final_carrera);
-  }
+#ifdef VERBOSE
+  Serial.print("s_finalcarrera: ");
+  Serial.println(sensor_final_carrera);
+#endif
   sensor_final_carrera = digitalRead(PIN_FIN_CARRERA_HOME);
   //Giramos el motor hasta que encuentre el final de carrera "home"
   myStepper.setSpeed(100);
@@ -506,11 +548,10 @@ void ajuste_inicial_cabezal_bobinadora(uint16_t distanciaoffset)
     sensor_final_carrera = digitalRead(PIN_FIN_CARRERA_HOME);
   }
   // Una vez tenemos el devanador en el home lo llevamos a su distancia offset
-  if (VERBOSE)
-  {
-    Serial.print("Avanza Offset: ");
-    Serial.println(-distanciaoffset);
-  }
+#ifdef VERBOSE
+  Serial.print("Avanza Offset: ");
+  Serial.println(-distanciaoffset);
+#endif
   myStepper.step(-distanciaoffset);
 }
 
@@ -518,9 +559,11 @@ void activa_freno()
 {
   if (!freno_activo) // Para activarlo una única vez
   {
-    if (VERBOSE)
-      Serial.println("* FRENO ON");
-    digitalWrite(PIN_MOTOR_FRENO, HIGH);
+#ifdef VERBOSE
+    Serial.println("* FRENO ON");
+#endif
+    digitalWrite(PIN_MOTOR_FRENO_1, HIGH);
+    digitalWrite(PIN_MOTOR_FRENO_2, HIGH);
     freno_activo = true;
     activacion_freno_elapsedMillis = sinceStart;
   }
@@ -528,9 +571,11 @@ void activa_freno()
 
 void desactiva_freno()
 {
-  if (VERBOSE)
-    Serial.println("* FRENO OFF");
-  digitalWrite(PIN_MOTOR_FRENO, LOW);
+#ifdef VERBOSE
+  Serial.println("* FRENO OFF");
+#endif
+  digitalWrite(PIN_MOTOR_FRENO_1, LOW);
+  digitalWrite(PIN_MOTOR_FRENO_2, LOW);
   freno_activo = false;
   activacion_freno_elapsedMillis = 0;
 }
@@ -560,32 +605,30 @@ void cuenta_vueltas_motor(uint16_t distanciamov, uint16_t velocidadmov, uint16_t
   if (contador_vueltas_motor < nmovimientos)
   {
     sinceStart = 0;
-    if (VERBOSE)
-    {
-      Serial.print("Distancia mov step: ");
-      Serial.print((int)distanciamov * signo);
-      Serial.print("; VUELTA n=");
-      Serial.print(contador_vueltas_motor);
-      Serial.print("/");
-      Serial.println(programas[programa_seleccionado].numero_movimientos);
-    }
+#ifdef VERBOSE
+    Serial.println("* FRENO ON");
+    Serial.print("Distancia mov step: ");
+    Serial.print((int)distanciamov * signo);
+    Serial.print("; VUELTA n=");
+    Serial.print(contador_vueltas_motor);
+    Serial.print("/");
+    Serial.println(programas[programa_seleccionado].numero_movimientos);
+#endif
     set_texto_fila_lcd(String("*MOVS: ") + (contador_vueltas_motor + 1) + String("/") + programas[programa_seleccionado].numero_movimientos, 1);
     myStepper.step((int)distanciamov * signo); //Distancia en número de pasos
     contador_vueltas_motor += 1;
   }
   else
   {
-    if (VERBOSE)
-    {
-      Serial.print("END OK PROGRAMA_");
-      Serial.println(programa_seleccionado + 1);
-    }
+#ifdef VERBOSE
+    Serial.print("END OK PROGRAMA_");
+    Serial.println(programa_seleccionado + 1);
+#endif
     set_estado_paro_por_finalizacion();
-    if (VERBOSE)
-    {
-      Serial.print("Entrada en SELECC tras terminar PROGRAMA_");
-      Serial.println(programa_seleccionado + 1);
-    }
+#ifdef VERBOSE
+    Serial.print("Entrada en SELECC tras terminar PROGRAMA_");
+    Serial.println(programa_seleccionado + 1);
+#endif
     set_estado_seleccion();
   }
 }
@@ -597,12 +640,11 @@ void proceso_de_freno_motor(uint16_t num_periodos_freno)
   elapsedMillis sinceFreno = 0;
 
   set_texto_fila_lcd(String("* Wait for brake"), 1);
-  if (VERBOSE)
-  {
-    Serial.print("** Comienza el temporizado de ");
-    Serial.print(tiempo_espera_para_frenado_ms / 1000.);
-    Serial.println(" seg. para frenar el motor.");
-  }
+#ifdef VERBOSE
+  Serial.print("** Comienza el temporizado de ");
+  Serial.print(tiempo_espera_para_frenado_ms / 1000.);
+  Serial.println(" seg. para frenar el motor.");
+#endif
 
   // Esperamos hasta frenar:
   while(sinceFreno < tiempo_espera_para_frenado_ms)
@@ -611,11 +653,10 @@ void proceso_de_freno_motor(uint16_t num_periodos_freno)
     {
       periodos_freno += 1;
       set_texto_fila_lcd(String("* Braking in ") + ((num_periodos_freno - periodos_freno) * PERIODO_FRENO_SEG), 1);
-      if (VERBOSE)
-      {
-        Serial.print("* Braking in ");
-        Serial.println((num_periodos_freno - periodos_freno) * PERIODO_FRENO_SEG);
-      }
+#ifdef VERBOSE
+      Serial.print("* Braking in ");
+      Serial.println((num_periodos_freno - periodos_freno) * PERIODO_FRENO_SEG);
+#endif
     }
   }
   //Activamos freno
@@ -633,11 +674,10 @@ void set_estado_marcha(bool desde_paro, uint16_t velocidadmov)
     // Ajuste de bobina inicial
     ajuste_inicial_cabezal_bobinadora(programas[programa_seleccionado].distancia_offset_num_pasos);
     set_texto_fila_lcd(String("Waiting to start"), 1);
-    if (VERBOSE)
-    {
-      Serial.print("Esperando a comenzar P_");
-      Serial.println(programa_seleccionado + 1);
-    }
+#ifdef VERBOSE
+    Serial.print("Esperando a comenzar P_");
+    Serial.println(programa_seleccionado + 1);
+#endif
     // Esperar a botón start
     while (true)
     {
@@ -742,7 +782,7 @@ void set_estado_config()
   hay_click_rotary_enc = false;
 }
 
-void eeprom_save_config_programa(int indice_programa, bool verbose_mode)
+void eeprom_save_config_programa(int indice_programa)
 {
   int eeAddress;
   config_prog_t conf_i;
@@ -751,14 +791,13 @@ void eeprom_save_config_programa(int indice_programa, bool verbose_mode)
   eeAddress = sizeof(bool) + sizeof(config_prog_t) * indice_programa;
   EEPROM.put(eeAddress, conf_i);
 
-  if (verbose_mode)
-  {
-    Serial.print("Se sobreescribe PROGRAMA ");
-    Serial.print(indice_programa + 1);
-    Serial.println(" en EEPROM: ");
-    print_config_programa(indice_programa);
-    Serial.println("");
-  }
+#ifdef VERBOSE
+  Serial.print("Se sobreescribe PROGRAMA ");
+  Serial.print(indice_programa + 1);
+  Serial.println(" en EEPROM: ");
+  print_config_programa(indice_programa);
+  Serial.println("");
+#endif
 }
 
 void seleccion_programa()
@@ -788,25 +827,26 @@ void seleccion_programa()
   // Para frenar el rotary en la selección de programa
   delay(300);
 
+#ifdef USE_LCD
   // Refresco LCD
   i_refresca_inf_izq_lcd();
+#endif
 }
 
 void configuracion_parametros_programa_actual()
 {
-  // Modo de edición de variables del programa seleccionado
+  // Modo de edicion de variables del programa seleccionado
   bool programa_modificado = false;
 
-  // Loop hasta que se entra en edición de parámetro o se sale de configuración:
+  // Loop hasta que se entra en edicion de parámetro o se sale de configuración:
   hay_doble_click_rotary_enc = false;
   hay_click_rotary_enc = false;
 
-  if (VERBOSE)
-  {
-    Serial.print("--> modo config de P_");
-    Serial.println(programa_seleccionado + 1);
-    print_config_programa(programa_seleccionado);
-  }
+#ifdef VERBOSE
+  Serial.print("--> modo config de P_");
+  Serial.println(programa_seleccionado + 1);
+  print_config_programa(programa_seleccionado);
+#endif
 
   while (!hay_doble_click_rotary_enc)
   {
@@ -824,7 +864,7 @@ void configuracion_parametros_programa_actual()
         CASEBREAK(ClickEncoder::Pressed);
         CASEBREAK(ClickEncoder::Held);
         CASEBREAK(ClickEncoder::Released);
-        case ClickEncoder::Clicked: // Edición de parámetro
+        case ClickEncoder::Clicked: // edicion de parámetro
         {
           config_prog_t programa_edit = programas[programa_seleccionado];
           bool hay_cambio_valor;
@@ -863,30 +903,28 @@ void configuracion_parametros_programa_actual()
             // volcado de valores!
             vuelca_nueva_config_programa(programa_seleccionado, programa_edit);
           }
-          if (VERBOSE)
-          {
-            Serial.print("EXIT EDIT VAR. Changes? ");
-            Serial.println(hay_cambio_valor);
-            Serial.print("; prog modified? ");
-            Serial.println(programa_modificado);
-            print_config_programa(programa_seleccionado);
-          }
+#ifdef VERBOSE
+          Serial.print("EXIT EDIT VAR. Changes? ");
+          Serial.println(hay_cambio_valor);
+          Serial.print("; prog modified? ");
+          Serial.println(programa_modificado);
+          print_config_programa(programa_seleccionado);
+#endif
           set_estado_config();
           break;
         }
         case ClickEncoder::DoubleClicked: // Salida a selección de programa
         {
-          if (VERBOSE)
-          {
-            Serial.print("Exiting config mode of P_");
-            Serial.println(programa_seleccionado + 1);
-            print_config_programa(programa_seleccionado);
-          }
+#ifdef VERBOSE
+          Serial.print("Exiting config mode of P_");
+          Serial.println(programa_seleccionado + 1);
+          print_config_programa(programa_seleccionado);
+#endif
 
           // Grabación de programa seleccionado en EEPROM
           if (programa_modificado)
           {
-            eeprom_save_config_programa(programa_seleccionado, VERBOSE);
+            eeprom_save_config_programa(programa_seleccionado);
             set_texto_lcd(String("** Guardado"), String("--> PROGRAMA ") + (programa_seleccionado + 1));
             delay(DELAY_MS_CMD_MENU);
           }
@@ -900,6 +938,7 @@ void configuracion_parametros_programa_actual()
     delay(300);
   }
 }
+
 const char *i_text_variation_order_mag(uint8_t order_mag)
 {
   switch (order_mag)
@@ -934,17 +973,18 @@ void i_trim_number(uint16_t valor, float factor_conv_variable,
   if (opc_after != NULL)
     *opc_after = String("_" + *tnum_after);
 
-  /*if (VERBOSE)
-  {
-    Serial.print("** DEBUG TRIM. Pos:");
-    Serial.print(pos_cifra);
-    Serial.print(", Cifra: ");
-    Serial.print(*cifra);
-    Serial.print(", tnum_before: ");
-    Serial.print(*tnum_before);
-    Serial.print(", tnum_after: ");
-    Serial.println(*tnum_after);
-  }*/
+/*
+#ifdef VERBOSE
+  Serial.print("** DEBUG TRIM. Pos:");
+  Serial.print(pos_cifra);
+  Serial.print(", Cifra: ");
+  Serial.print(*cifra);
+  Serial.print(", tnum_before: ");
+  Serial.print(*tnum_before);
+  Serial.print(", tnum_after: ");
+  Serial.println(*tnum_after);
+#endif
+*/
 }
 
 bool edicion_variable_por_cifras(String ref_variable, uint16_t *valor_edit, uint16_t valor_min, uint16_t valor_max, float factor_conv_variable)
@@ -972,47 +1012,60 @@ bool edicion_variable_por_cifras(String ref_variable, uint16_t *valor_edit, uint
   delay(DELAY_MS_CMD_MENU / 2);
 
   set_texto_fila_lcd(String(before + String(cifra) + after), 1);
-  while (!hay_doble_click_rotary_enc)  // Salida de edición por cifras mediante doble click
+  while (!hay_doble_click_rotary_enc)  // Salida de edicion por cifras mediante doble click
   {
-    ClickEncoder::Button b = rotary_encoder->getButton();
     hay_cambio = i_hay_cambio_unitario_rotary_encoder(&cifra, 9);
     if (hay_cambio)
     {
       valor = String(tnum_before + String(cifra) + tnum_after).toInt();
       //Serial.println(String("NEW --> ") + String(valor) + String(", -> ") + tnum_before + String(" + ") + String(cifra) + String(" + ") + tnum_after);
       set_texto_fila_lcd(String(before + String(cifra) + after), 1);
+      sinceStart = 0;
     }
-
-    if (b != ClickEncoder::Open)
+    else
     {
-      switch (b)
+      ClickEncoder::Button b = rotary_encoder->getButton();
+      if (b != ClickEncoder::Open)
       {
-        CASEBREAK(ClickEncoder::Pressed);
-        CASEBREAK(ClickEncoder::Held);
-        CASEBREAK(ClickEncoder::Released);
-        case ClickEncoder::Clicked:
-          // Rotación de cifra
-          if (pos_cifra + 1 < order_max)
-            pos_cifra += 1;
-          else
-            pos_cifra = 0;
-          i_trim_number(valor, factor_conv_variable, pos_cifra, order_max,
-                        &cifra, &tnum_before, &tnum_after, &before, &after);
-          //Serial.println(String("ROTACION CIFRA_CLICK --> ") + String(valor) + String(", -> ") + tnum_before + String(" + ") + String(cifra) + String(" + ") + tnum_after);
-          set_texto_fila_lcd(String(before + String(cifra) + after), 1);
-          //break;
-        case ClickEncoder::DoubleClicked:
-          //Serial.println(String("SALIDA DBLCLICK --> ") + String(valor) + String(", -> ") + tnum_before + String(" + ") + String(cifra) + String(" + ") + tnum_after);
-          hay_doble_click_rotary_enc = true;
-          break;
+        switch (b)
+        {
+          CASEBREAK(ClickEncoder::Pressed);
+          CASEBREAK(ClickEncoder::Held);
+          CASEBREAK(ClickEncoder::Released);
+          case ClickEncoder::Clicked:
+            // Rotación de cifra
+            if (pos_cifra + 1 < order_max)
+              pos_cifra += 1;
+            else
+              pos_cifra = 0;
+            i_trim_number(valor, factor_conv_variable, pos_cifra, order_max,
+                          &cifra, &tnum_before, &tnum_after, &before, &after);
+#ifdef VERBOSE
+            Serial.println(String("ROTACION CIFRA_CLICK --> ") + String(valor) + String(", -> ") + tnum_before + String(" + ") + String(cifra) + String(" + ") + tnum_after);
+#endif
+            set_texto_fila_lcd(String(before + String(cifra) + after), 1);
+            sinceStart = 0;
+            break;
+          case ClickEncoder::DoubleClicked:
+#ifdef VERBOSE
+            Serial.println(String("SALIDA DBLCLICK --> ") + String(valor) + String(", -> ") + tnum_before + String(" + ") + String(cifra) + String(" + ") + tnum_after);
+#endif
+            hay_doble_click_rotary_enc = true;
+            break;
+        }
       }
     }
 
-    // Salida por tiempo máximo de edición TODO Revisión de validez
-    if (sinceStart > 35000)
+    // Salida por tiempo máximo de edicion sin cambios
+    if (sinceStart > DELAY_TIMEOUT_EDIT_VAR_MS)
+    {
+#ifdef VERBOSE
+      Serial.println("Saliendo de edicion por timeout");
+#endif
       hay_doble_click_rotary_enc = true;
+    }
 
-    // Para frenar el rotary en la edición por cifras
+    // Para frenar el rotary en la edicion por cifras
     delay(300);
   }
   if (valor < valor_min)
@@ -1021,23 +1074,23 @@ bool edicion_variable_por_cifras(String ref_variable, uint16_t *valor_edit, uint
     valor = valor_max;
 
   set_texto_fila_lcd(String("Se acepta: ") + (int)(valor / factor_conv_variable), 1);
-  delay(DELAY_MS_CMD_MENU / 2);
+  delay(DELAY_MS_CMD_MENU);
   hay_doble_click_rotary_enc = false;
   if (valor != valor_ant)
   {
-    /*if (VERBOSE)
-    {
-      Serial.print("Saliendo de edición por cifras con cambios: ");
-      Serial.print(valor_ant);
-      Serial.print(" --> ");
-      Serial.println(valor);
-    }*/
+#ifdef VERBOSE
+    Serial.print("Saliendo de edicion por cifras con cambios: ");
+    Serial.print(valor_ant);
+    Serial.print(" --> ");
+    Serial.println(valor);
+#endif
     *valor_edit = (uint16_t)(valor / factor_conv_variable);
     return true;
   }
   return false;
 }
 
+#ifdef USE_LCD
 void i_refresca_inf_izq_lcd()
 {
   // Refresco LCD
@@ -1052,6 +1105,7 @@ void i_refresca_inf_izq_lcd()
     sinceStatus = 0;
   }
 }
+#endif
 
 String i_time_string(float millis)
 {
@@ -1067,10 +1121,12 @@ static inline int8_t i_signo(int val)
 
 bool i_hay_cambio_unitario_rotary_encoder(uint8_t *variable_edit, uint16_t valor_max)
 {
+  int old_value = (int)(*variable_edit);
   int signo_cambio = i_signo(rotary_encoder->getValue());
-  if (((signo_cambio > 0) & (*variable_edit < valor_max)) | ((signo_cambio < 0) & (*variable_edit >= 0)))
+  if (((signo_cambio > 0) & (old_value < valor_max)) | ((signo_cambio < 0) & (old_value > 0)))
   {
-    *variable_edit += signo_cambio;
+    old_value += signo_cambio;
+    *variable_edit = (uint8_t)old_value;
     return true;
   }
   return false;
@@ -1083,6 +1139,7 @@ bool i_sube_flanco(int estado_ant, int new_estado)
   return false;
 }
 
+#ifdef VERBOSE
 void i_print_config_programa(uint8_t indice_programa, const config_prog_t conf_print)
 {
   Serial.print("PROG_");
@@ -1098,6 +1155,7 @@ void i_print_config_programa(uint8_t indice_programa, const config_prog_t conf_p
   Serial.print("; OFFSET (num. pasos)=");
   Serial.println(conf_print.distancia_offset_num_pasos);
 }
+#endif
 
 String i_completa_fila_led(String orig)
 {
@@ -1112,13 +1170,32 @@ String i_completa_fila_led(String orig)
 
 void set_texto_fila_lcd(String fila, unsigned char n_fila)
 {
+#ifdef USE_LCD
   lcd.setCursor(0, n_fila);
   lcd.print(i_completa_fila_led(fila));
+#else
+  Serial.print("LCD");
+  Serial.print(n_fila + 1);
+  Serial.print("_:   >>> ");
+  Serial.print(i_completa_fila_led(fila));
+  Serial.println(" <<<");
+#endif
 }
 
 void set_texto_lcd(String fila_1, String fila_2)
 {
+#ifdef USE_LCD
   //lcd.clear();
   set_texto_fila_lcd(fila_1, 0);
   set_texto_fila_lcd(fila_2, 1);
+#else
+  //          ________________________
+  // LCD1_:   >>> TESTING ...      <<<
+  // LCD2_:   >>> TESTING ...      <<<
+  //          ------------------------
+  Serial.println("         ________________________");
+  set_texto_fila_lcd(fila_1, 0);
+  set_texto_fila_lcd(fila_2, 1);
+  Serial.println("         ------------------------");
+#endif
 }
