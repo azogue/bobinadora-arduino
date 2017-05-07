@@ -17,7 +17,7 @@
 //    uint16_t numero_movimientos;
 //    uint16_t distancia_movimiento_num_pasos;
 //    uint16_t velocidad_movimiento_rpm;
-//    uint16_t num_periodos_freno;
+//    uint16_t decimas_segundo_freno;
 //    uint16_t distancia_offset_num_pasos;
 // - Control de rangos de variables;
 // - Persistencia en EEPROM de cambios de configuración;
@@ -46,44 +46,67 @@
     - [X] Separación de frenos.
     - [X] Switch para usar LCD / monitor serie
     - [X] Optimización memoria para PLC Leonardo
-    - [ ] LCD por spi
-    - [ ] Modificación de frenado para comenzar a frenar ∆T antes de finalización de programa
-    - [ ] Otros cambios para PLC Leonardo
-
-// ---------------------------------------------------------------------------
-
-# USO DE MEMORIA en Placa Arduino Leonardo
-  - El espacio de almacenamiento de programa máximo es 28672 bytes.
-  - La memoria es de 2560 bytes.
-
-* Sin LCD, sin VERBOSE: (serial imita al LCD)
-  El Sketch usa 21708 bytes (75%) del espacio de almacenamiento de programa.
-  Las variables Globales usan 1126 bytes (43%) de la memoria dinámica, dejando 1434 bytes para las variables locales.
-
-* Sin LCD, con VERBOSE: (serial imita al LCD + debug info)
-  El Sketch usa 24418 bytes (85%) del espacio de almacenamiento de programa.
-  Las variables Globales usan 1956 bytes (76%) de la memoria dinámica, dejando 604 bytes para las variables locales.
-  Poca memoria disponible, se pueden producir problemas de estabilidad.
-
-* Con LCD, con VERBOSE: (debug info)
-  El Sketch usa 25922 bytes (90%) del espacio de almacenamiento de programa.
-  Las variables Globales usan 1950 bytes (76%) de la memoria dinámica, dejando 610 bytes para las variables locales.
-  Poca memoria disponible, se pueden producir problemas de estabilidad.
-
-* Con LCD, sin VERBOSE (production mode):
-  El Sketch usa 22902 bytes (79%) del espacio de almacenamiento de programa.
-  Las variables Globales usan 1118 bytes (43%) de la memoria dinámica, dejando 1442 bytes para las variables locales.
-
+    - [X] Modificación de frenado para comenzar a frenar ∆T antes de finalización de programa
 */
 
 //**********************************
 //** FLAGS *************************
 //**********************************
 // Switch para mostrar info en Serial
-//#define VERBOSE
+#define VERBOSE
 
 // Switch para usar LCD 2x16 (vs Serial)
-//#define USE_LCD
+#define USE_LCD
+
+// Switch para usar pines en PLC Mega
+#define USE_PLC_MEGA
+
+// Negación del pin enable driver del stepper
+#define NEGATE_LOGIC_DEVANADOR
+
+// Cambio sentido de devanador
+#define MOVIMIENTO_EN_IDA_INICIAL       false
+
+//**********************************
+//** PINOUT ************************
+//**********************************
+
+#ifdef USE_PLC_MEGA
+  #define PIN_BOTON_PARO_RESET      18    // 3           // Botón de PARO / RESET  (Interrupt)
+  #define PIN_FALLO_1_2             19  // 19          // Señal de Fallo 1 o 2 (input único) (Interrupt)
+
+  #define PIN_BOTON_START           14   // 4           // Botón de START / REANUDACIÓN
+  #define PIN_FIN_CARRERA_HOME      15   // 7           // Sensor de final de carrera Home
+
+  #define PIN_ROTARY_ENC_CLK        A2
+  #define PIN_ROTARY_ENC_DT         A1
+  #define PIN_ROTARY_ENC_SW         A0
+
+  #define PIN_1_MOTOR_STEP          2   // 8           // Stepper PIN1 (step)
+  #define PIN_2_MOTOR_STEP_DIR      3   // 9           // Stepper PIN2 (dirección)
+  #define PIN_MOTOR_DEVANADOR       50  // 10          // Motor devanador (enable driver)
+  #define PIN_MOTOR_VARIADOR        25  // 11          // Variador
+  #define PIN_MOTOR_FRENO_1         22  // 12          // Freno 1
+  #define PIN_MOTOR_FRENO_2         23                 // Freno 2
+#else
+  #define PIN_BOTON_PARO_RESET      0    // 3           // Botón de PARO / RESET  (Interrupt)
+  #define PIN_FALLO_1_2             1  // 19          // Señal de Fallo 1 o 2 (input único) (Interrupt)
+
+  #define PIN_BOTON_START           A3   // 4           // Botón de START / REANUDACIÓN
+  #define PIN_FIN_CARRERA_HOME      A4   // 7           // Sensor de final de carrera Home
+
+  #define PIN_ROTARY_ENC_CLK        A2  // A2
+  #define PIN_ROTARY_ENC_DT         A1  // A1
+  #define PIN_ROTARY_ENC_SW         A0  // A0
+
+  #define PIN_1_MOTOR_STEP          3   // 8           // Stepper PIN1
+  #define PIN_2_MOTOR_STEP_DIR      2   // 9           // Stepper PIN2
+
+  #define PIN_MOTOR_DEVANADOR       9  // 10          // Motor devanador (enable driver)
+  #define PIN_MOTOR_VARIADOR        8  // 11          // Variador
+  #define PIN_MOTOR_FRENO_1         4  // 12          // Freno 1
+  #define PIN_MOTOR_FRENO_2         7                 // Freno 2
+#endif
 
 //**********************************
 //** Librerías *********************
@@ -93,34 +116,12 @@
 #include <elapsedMillis.h>
 #include <Stepper.h>
 #include <TimerOne.h>
+#include <FlexiTimer2.h>
 #include <Wire.h>
 #ifdef USE_LCD
   #include <LCD.h>
   #include <LiquidCrystal_I2C.h>  // F Malpartida's NewLiquidCrystal library
 #endif
-
-//**********************************
-//** PINOUT ************************
-//**********************************
-#define PIN_BOTON_PARO_RESET      0    // 3           // Botón de PARO / RESET  (Interrupt)
-#define PIN_FALLO_1_2             1  // 19          // Señal de Fallo 1 o 2 (input único) (Interrupt)
-
-#define PIN_BOTON_START           A3   // 4           // Botón de START / REANUDACIÓN
-#define PIN_FIN_CARRERA_HOME      A4   // 7           // Sensor de final de carrera Home
-
-#define PIN_ROTARY_ENC_CLK        A2  // A2
-#define PIN_ROTARY_ENC_DT         A1  // A1
-#define PIN_ROTARY_ENC_SW         A0  // A0
-
-#define PIN_1_MOTOR_STEP          2   // 8           // Stepper PIN1
-#define PIN_2_MOTOR_STEP          3   // 9           // Stepper PIN2
-
-#define PIN_MOTOR_DEVANADOR       9  // 10          // Motor devanador (enable driver)
-#define PIN_MOTOR_VARIADOR        8  // 11          // Variador
-#define PIN_MOTOR_FRENO_1         4  // 12          // Freno 1
-#define PIN_MOTOR_FRENO_2         7                 // Freno 2
-
-#define LED_PLACA                 13  // 13          // Simulando el encendido del motor, y/o como led de actividad
 
 //**********************************
 //** Configuración *****************
@@ -129,12 +130,12 @@
 
 #define NUM_PROGRAMAS             10
 #define NUM_OPCIONES              5
+#define STEPS_MOTOR               200         // Stepper config.
+
 #define DELAY_MS_CMD_MENU         500         // Delay en navegación en estados de edicion, para mostrar mensajes breves en el LCD, en ms
 #define DELAY_ENTRE_PARO_RESET_MS 5000        // Tiempo mínimo entre estado de PARO y RESET a modo SELECC, en ms
 #define DELAY_TIMEOUT_EDIT_VAR_MS 10000       // Tiempo de standby antes de la aceptación automática del valor editado.
-#define TIEMPO_FRENADO_MS         4000        // Tiempo de activación del freno, en ms
-
-#define STEPS_MOTOR               200         // Stepper config.
+#define TIEMPO_FRENADO_MS         5000        // Tiempo de activación del freno, en ms. Coincidente con el rango máximo del parámetro 'Freno segs'.
 
 // Resto
 #define LCD_CHARS                 16
@@ -159,14 +160,14 @@
 const char* OPCIONES_PROGRAMA[] = {"- Num movs",
                                    "- Distanc. pasos",
                                    "- Velocidad rpm",
-                                   "- Freno segs",
+                                   "- Freno d_segs",
                                    "- Offset pasos"};
-const char* OPCIONES_PROGRAMA_CORTAS[5] = {"N Movs", "Dist. NP", "Vel. rpm", "Freno seg", "Offset NP"};
+const char* OPCIONES_PROGRAMA_CORTAS[5] = {"N Movs", "Dist. NP", "Vel. rpm", "Freno d_seg", "Offset NP"};
 
 // Configuraciones por defecto de los programas de bobinado
-double PERIODO_FRENO_SEG = .5;
+double PERIODO_FRENO_SEG = .1;
 uint16_t OPCIONES_RANGO_MIN[5] = {0, 100, 10, 0, 0};
-uint16_t OPCIONES_RANGO_MAX[5] = {1500, 3000, 400, (uint16_t)(5 / PERIODO_FRENO_SEG), 1000};
+uint16_t OPCIONES_RANGO_MAX[5] = {1500, 3000, 400, (uint16_t)(TIEMPO_FRENADO_MS / 100), 1000};
 
 uint16_t VALORES_DEFECTO_P1[5] = {43, 900, 127, 0, 70};
 uint16_t VALORES_DEFECTO_P2[5] = {43, 900, 127, 0, 70};
@@ -185,7 +186,7 @@ struct config_prog_t
   uint16_t numero_movimientos;
   uint16_t distancia_movimiento_num_pasos;
   uint16_t velocidad_movimiento_rpm;
-  uint16_t num_periodos_freno;
+  uint16_t decimas_segundo_freno;
   uint16_t distancia_offset_num_pasos;
 };
 const int eeAddressDelta = sizeof(config_prog_t);
@@ -194,12 +195,12 @@ config_prog_t programas[NUM_PROGRAMAS];
 // Contadores de tiempo
 elapsedMillis sinceStart;
 elapsedMillis sinceStatus;
-//elapsedMillis sinceBrake;
+elapsedMillis sinceBrake;
 
 // Variables 'volátiles' (se escriben en interrupciones)
 volatile uint8_t estado_general;
 volatile uint8_t tipo_parada;
-volatile uint8_t pin_fallo;
+volatile int8_t pin_fallo = -1;
 volatile bool freno_activo;
 volatile unsigned long activacion_freno_elapsedMillis;
 
@@ -226,10 +227,9 @@ void timerIsr() {
 }
 
 // Stepper
-Stepper myStepper(STEPS_MOTOR, PIN_1_MOTOR_STEP, PIN_2_MOTOR_STEP);  //(pasos por vuelta, step, dir)
-int contador_vueltas_motor;
+Stepper myStepper(STEPS_MOTOR, PIN_1_MOTOR_STEP, PIN_2_MOTOR_STEP_DIR);  //(pasos por vuelta, step, dir)
+uint16_t contador_vueltas_motor;
 bool movimiento_en_ida;
-
 
 //**********************************
 //** SETUP INICIAL *****************
@@ -274,8 +274,6 @@ void setup_interrupts()
 
 void setup_motor_bobinadora()
 {
-  pinMode(LED_PLACA, OUTPUT);  //Led Arduino Mega
-
   pinMode(PIN_MOTOR_DEVANADOR, OUTPUT);   // Enable Motor Devanador
   pinMode(PIN_MOTOR_VARIADOR, OUTPUT);    // Relé Variador
   pinMode(PIN_MOTOR_FRENO_1, OUTPUT);     // Relé Freno
@@ -283,7 +281,7 @@ void setup_motor_bobinadora()
 
   // Apagando motores al inicio
   desactiva_freno();              // Desactivamos freno
-  digitalWrite(PIN_MOTOR_DEVANADOR, LOW);   // Desactivamos motor devanador
+  i_opera_devanador(LOW); // Desactivamos motor devanador
   digitalWrite(PIN_MOTOR_VARIADOR, LOW);    // Desactivamos variador
 
   contador_vueltas_motor = 0;
@@ -368,7 +366,7 @@ int eeprom_write_config_defecto(int eeAddress, int indice_programa, const uint16
   conf_i.numero_movimientos = valores_programa[0];
   conf_i.distancia_movimiento_num_pasos = valores_programa[1];
   conf_i.velocidad_movimiento_rpm = valores_programa[2];
-  conf_i.num_periodos_freno = valores_programa[3];
+  conf_i.decimas_segundo_freno = valores_programa[3];
   conf_i.distancia_offset_num_pasos = valores_programa[4];
 
   EEPROM.put(eeAddress, conf_i);
@@ -386,7 +384,7 @@ int eeprom_write_config_defecto(int eeAddress, int indice_programa, const uint16
 
 void i_reset_direccion_devanador()
 {
-  movimiento_en_ida = false;
+  movimiento_en_ida = MOVIMIENTO_EN_IDA_INICIAL;
 }
 
 //**********************************
@@ -395,12 +393,18 @@ void i_reset_direccion_devanador()
 
 void loop()
 {
+  uint8_t estado_general_cycle;
+
+  noInterrupts();
+  estado_general_cycle = estado_general;
+  interrupts();
+
   comprueba_tiempo_de_frenado();
   read_start_button();
   // Modos de funcionamiento: CONFIG / SELEC / MARCHA / RESET / PARO
 
   // Inicio de programa seleccionado
-  if ((estado_general == STATE_SELECC) & (i_sube_flanco(estadoBotonLast_start, estadoBoton_start)))
+  if ((estado_general_cycle == STATE_SELECC) & (i_sube_flanco(estadoBotonLast_start, estadoBoton_start)))
   {
     set_texto_lcd(String("* RUNNING P_") + (programa_seleccionado + 1), String("Starting..."));
 #ifdef VERBOSE
@@ -410,23 +414,23 @@ void loop()
     set_estado_marcha(false, programas[programa_seleccionado].velocidad_movimiento_rpm);
   }
   // Aguarda cambio de programa o entrada a configuración de programa mediante rotary encoder
-  else if (estado_general == STATE_SELECC)
+  else if (estado_general_cycle == STATE_SELECC)
   {
     seleccion_programa();
   }
   // Modo de edicion de variables del programa seleccionado
-  else if (estado_general == STATE_CONFIG)
+  else if (estado_general_cycle == STATE_CONFIG)
   {
     configuracion_parametros_programa_actual();
   }
   // En modo marcha...
-  else if (estado_general == STATE_MARCHA)
+  else if (estado_general_cycle == STATE_MARCHA)
   {
     cuenta_vueltas_motor(programas[programa_seleccionado].distancia_movimiento_num_pasos,
-                         programas[programa_seleccionado].velocidad_movimiento_rpm,
-                         programas[programa_seleccionado].numero_movimientos);
+                         programas[programa_seleccionado].numero_movimientos,
+                         programas[programa_seleccionado].decimas_segundo_freno);
   }
-  else if (estado_general == STATE_RESET)
+  else if (estado_general_cycle == STATE_RESET)
   {
     // Reset del programa seleccionado
     set_texto_fila_lcd(String("** RESET P_") + (programa_seleccionado + 1), 0);
@@ -438,14 +442,13 @@ void loop()
     set_estado_seleccion();
   }
   // En modo paro, aguardando reset o reanudación
-  else // if (estado_general == STATE_PARO)
+  else // if (estado_general_cycle == STATE_PARO)
   {
     if (tipo_parada != TIPO_PARADA_FINALIZACION)
     {
-      digitalWrite(PIN_MOTOR_DEVANADOR, LOW);  // Desactivamos motor devanador
+      i_opera_devanador(LOW);  // Desactivamos motor devanador
       sinceStart = 0;
       sinceStatus = 0;
-      //sinceBrake = 0;
       if (tipo_parada == TIPO_PARADA_EMERGENCIA)
       {
         set_texto_fila_lcd(String("** ERROR P_") + (programa_seleccionado + 1), 0);
@@ -508,7 +511,7 @@ void vuelca_nueva_config_programa(uint8_t indice_programa, const config_prog_t n
   programas[indice_programa].numero_movimientos = nueva_config.numero_movimientos;
   programas[indice_programa].distancia_movimiento_num_pasos = nueva_config.distancia_movimiento_num_pasos;
   programas[indice_programa].velocidad_movimiento_rpm = nueva_config.velocidad_movimiento_rpm;
-  programas[indice_programa].num_periodos_freno = nueva_config.num_periodos_freno;
+  programas[indice_programa].decimas_segundo_freno = nueva_config.decimas_segundo_freno;
   programas[indice_programa].distancia_offset_num_pasos = nueva_config.distancia_offset_num_pasos;
 }
 
@@ -533,6 +536,13 @@ void update_last_state_start_button()
 
 void ajuste_inicial_cabezal_bobinadora(uint16_t distanciaoffset)
 {
+  int signo;
+
+  if (MOVIMIENTO_EN_IDA_INICIAL)
+    signo = 1;
+  else
+    signo = -1;
+
 #ifdef VERBOSE
   Serial.print("s_finalcarrera: ");
   Serial.println(sensor_final_carrera);
@@ -540,24 +550,32 @@ void ajuste_inicial_cabezal_bobinadora(uint16_t distanciaoffset)
   sensor_final_carrera = digitalRead(PIN_FIN_CARRERA_HOME);
   //Giramos el motor hasta que encuentre el final de carrera "home"
   myStepper.setSpeed(100);
-  digitalWrite(PIN_MOTOR_DEVANADOR, HIGH);  // Activamos motor devanador
+  i_opera_devanador(HIGH); // Activamos motor devanador
 
   while(sensor_final_carrera == LOW)
   {
-    myStepper.step(1);
+    myStepper.step(-signo);
     sensor_final_carrera = digitalRead(PIN_FIN_CARRERA_HOME);
   }
   // Una vez tenemos el devanador en el home lo llevamos a su distancia offset
 #ifdef VERBOSE
   Serial.print("Avanza Offset: ");
-  Serial.println(-distanciaoffset);
+  Serial.println(distanciaoffset * signo);
 #endif
-  myStepper.step(-distanciaoffset);
+  myStepper.step(distanciaoffset * signo);
+}
+
+void i_opera_devanador(bool state)
+{
+#ifdef NEGATE_LOGIC_DEVANADOR
+  state = !state;
+#endif
+  digitalWrite(PIN_MOTOR_DEVANADOR, state);   // Desactivamos motor devanador
 }
 
 void activa_freno()
 {
-  if (!freno_activo) // Para activarlo una única vez
+  if ((estado_general == STATE_MARCHA) & !freno_activo) // Para activarlo una única vez
   {
 #ifdef VERBOSE
     Serial.println("* FRENO ON");
@@ -565,7 +583,7 @@ void activa_freno()
     digitalWrite(PIN_MOTOR_FRENO_1, HIGH);
     digitalWrite(PIN_MOTOR_FRENO_2, HIGH);
     freno_activo = true;
-    activacion_freno_elapsedMillis = sinceStart;
+    activacion_freno_elapsedMillis = sinceBrake;
   }
 }
 
@@ -578,6 +596,7 @@ void desactiva_freno()
   digitalWrite(PIN_MOTOR_FRENO_2, LOW);
   freno_activo = false;
   activacion_freno_elapsedMillis = 0;
+  sinceBrake = 0;
 }
 
 void comprueba_tiempo_de_frenado()
@@ -586,13 +605,31 @@ void comprueba_tiempo_de_frenado()
   {
     unsigned long tiempo_freno_activo;
 
-    tiempo_freno_activo = sinceStart - activacion_freno_elapsedMillis;
+    tiempo_freno_activo = sinceBrake - activacion_freno_elapsedMillis;
     if (tiempo_freno_activo > TIEMPO_FRENADO_MS)
       desactiva_freno();
   }
 }
 
-void cuenta_vueltas_motor(uint16_t distanciamov, uint16_t velocidadmov, uint16_t nmovimientos)
+long int calcula_tiempo_hasta_final_de_programa(int delta_movimiento_ms, uint16_t nmovimientos)
+{
+  long int delta_to_final_ms;
+
+  delta_to_final_ms = (long int)delta_movimiento_ms * (long int)(nmovimientos - contador_vueltas_motor);
+#ifdef VERBOSE
+    Serial.print("DEBUG DELTA TO FINISH: ");
+    Serial.print(delta_to_final_ms);
+    Serial.print(" ms; DELTA MOV: ");
+    Serial.print(delta_movimiento_ms);
+    Serial.print(" ms; NMOVS: ");
+    Serial.print(nmovimientos);
+    Serial.print("; VUELTAS: ");
+    Serial.println(contador_vueltas_motor);
+#endif
+  return delta_to_final_ms;
+}
+
+void cuenta_vueltas_motor(uint16_t distanciamov, uint16_t nmovimientos, uint16_t decimas_segundo_freno)
 {
   int signo;
 
@@ -604,19 +641,45 @@ void cuenta_vueltas_motor(uint16_t distanciamov, uint16_t velocidadmov, uint16_t
 
   if (contador_vueltas_motor < nmovimientos)
   {
-    sinceStart = 0;
+    long int delta_movimiento_ms, delta_to_final_ms;
+
 #ifdef VERBOSE
-    Serial.println("* FRENO ON");
     Serial.print("Distancia mov step: ");
     Serial.print((int)distanciamov * signo);
     Serial.print("; VUELTA n=");
     Serial.print(contador_vueltas_motor);
     Serial.print("/");
-    Serial.println(programas[programa_seleccionado].numero_movimientos);
+    Serial.println(nmovimientos);
 #endif
-    set_texto_fila_lcd(String("*MOVS: ") + (contador_vueltas_motor + 1) + String("/") + programas[programa_seleccionado].numero_movimientos, 1);
+    set_texto_fila_lcd(String("*MOVS: ") + (contador_vueltas_motor + 1) + String("/") + nmovimientos, 1);
+    sinceStart = 0;
     myStepper.step((int)distanciamov * signo); //Distancia en número de pasos
+    delta_movimiento_ms = sinceStart;
     contador_vueltas_motor += 1;
+    delta_to_final_ms = calcula_tiempo_hasta_final_de_programa(delta_movimiento_ms, nmovimientos);
+    // si el frenado debe producirse antes de que acabe el siguiente mov:
+    if (!freno_activo & (delta_to_final_ms - (decimas_segundo_freno * PERIODO_FRENO_SEG * 1000) < delta_movimiento_ms))
+    {
+      long int delta_to_frenado_ms = delta_to_final_ms - (decimas_segundo_freno * PERIODO_FRENO_SEG * 1000);
+
+      if (delta_to_frenado_ms < 100)
+      {
+#ifdef VERBOSE
+        Serial.print("DEBUG: ACTIVACION INSTANTANEA FRENO. DELTA_FRENADO_MS=");
+        Serial.println(delta_to_frenado_ms);
+#endif
+        activa_freno();
+      }
+      else
+      {
+#ifdef VERBOSE
+        Serial.print("DEBUG: SET TIMER TO FRENADO EN DELTA_FRENADO_MS=");
+        Serial.println(delta_to_frenado_ms);
+#endif
+        FlexiTimer2::set(delta_to_frenado_ms, activa_freno);
+        FlexiTimer2::start();
+      }
+    }
   }
   else
   {
@@ -631,40 +694,6 @@ void cuenta_vueltas_motor(uint16_t distanciamov, uint16_t velocidadmov, uint16_t
 #endif
     set_estado_seleccion();
   }
-}
-
-void proceso_de_freno_motor(uint16_t num_periodos_freno)
-{
-  float tiempo_espera_para_frenado_ms = num_periodos_freno * PERIODO_FRENO_SEG * 1000;
-  uint16_t periodos_freno = 0;
-  elapsedMillis sinceFreno = 0;
-
-  set_texto_fila_lcd(String("* Wait for brake"), 1);
-#ifdef VERBOSE
-  Serial.print("** Comienza el temporizado de ");
-  Serial.print(tiempo_espera_para_frenado_ms / 1000.);
-  Serial.println(" seg. para frenar el motor.");
-#endif
-
-  // Esperamos hasta frenar:
-  while(sinceFreno < tiempo_espera_para_frenado_ms)
-  {
-    if ((sinceFreno / 1000.) / PERIODO_FRENO_SEG > periodos_freno)
-    {
-      periodos_freno += 1;
-      set_texto_fila_lcd(String("* Braking in ") + ((num_periodos_freno - periodos_freno) * PERIODO_FRENO_SEG), 1);
-#ifdef VERBOSE
-      Serial.print("* Braking in ");
-      Serial.println((num_periodos_freno - periodos_freno) * PERIODO_FRENO_SEG);
-#endif
-    }
-  }
-  //Activamos freno
-  activa_freno();
-
-  // Informamos y salimos del proceso de frenado
-  set_texto_fila_lcd(String("** Motor Brake"), 1);
-  delay(DELAY_MS_CMD_MENU);
 }
 
 void set_estado_marcha(bool desde_paro, uint16_t velocidadmov)
@@ -692,15 +721,13 @@ void set_estado_marcha(bool desde_paro, uint16_t velocidadmov)
   }
 
   estado_general = STATE_MARCHA;
-  hay_doble_click_rotary_enc = false;
-  hay_click_rotary_enc = false;
+  i_reset_rotary_encoder();
   sinceStart = 0;
   sinceStatus = 0;
-  //sinceBrake = 0;
 
   myStepper.setSpeed(velocidadmov);     // Velocidad del devanador
   desactiva_freno();            // Desactivamos freno
-  digitalWrite(PIN_MOTOR_DEVANADOR, HIGH);  // Activamos motor devanador
+  i_opera_devanador(HIGH);      // Activamos motor devanador
   digitalWrite(PIN_MOTOR_VARIADOR, HIGH);   // Activamos variador
 }
 
@@ -709,21 +736,15 @@ void set_estado_paro_general(int tipo_entrada_en_paro, int pin_responsable_paro)
   // PARO del programa si está en marcha
   if (estado_general == STATE_MARCHA)
   {
-    digitalWrite(LED_PLACA, LOW);               // Máquina en paro
     digitalWrite(PIN_MOTOR_VARIADOR, LOW);      // Desactivamos variador
 
-    /* TODO aclarar funcionamiento del frenado:
-    Se está haciendo un frenado instantáneo en la entrada en paro, para después
-    llamar a proceso_de_freno_motor que espera 4 seg antes de frenar ¿¿??
-    */
+    // TODO revisar timer stop
+    FlexiTimer2::stop();
     activa_freno();                 // Frenado instantáneo
 
     if (tipo_entrada_en_paro == TIPO_PARADA_FINALIZACION)
     {
-      digitalWrite(PIN_MOTOR_DEVANADOR, LOW);   // Desactivamos motor devanador
-
-      // Frenado antes de selección:
-      proceso_de_freno_motor(programas[programa_seleccionado].num_periodos_freno);
+      i_opera_devanador(LOW);  // Desactivamos motor devanador
       sinceStart = 0;
       sinceStatus = 0;
     }
@@ -746,7 +767,7 @@ void isr_set_estado_paro_o_reset_manual()
   // Entrada a RESET manual tras PARO (con botón PARO/RESET)
   if ((estado_general == STATE_PARO) && (sinceStart > DELAY_ENTRE_PARO_RESET_MS))
   {
-    digitalWrite(PIN_MOTOR_DEVANADOR, LOW); // Desactivamos motor devanador
+    i_opera_devanador(LOW); // Desactivamos motor devanador
     estado_general = STATE_RESET;
     tipo_parada = TIPO_PARADA_MANUAL;
     pin_fallo = -1;
@@ -769,17 +790,15 @@ void set_estado_seleccion()
   estado_general = STATE_SELECC;
   tipo_parada = TIPO_PARADA_FINALIZACION;
   pin_fallo = -1;
-  hay_doble_click_rotary_enc = false;
-  hay_click_rotary_enc = false;
-  (void)rotary_encoder->getValue();
+  i_reset_rotary_encoder();
+  // TODO revisar timer stop
+  FlexiTimer2::stop();
 }
 
 void set_estado_config()
 {
   set_texto_lcd(String("** Edicion P_") + (programa_seleccionado + 1), String(OPCIONES_PROGRAMA[variable_seleccionada]));
   estado_general = STATE_CONFIG;
-  hay_doble_click_rotary_enc = false;
-  hay_click_rotary_enc = false;
 }
 
 void eeprom_save_config_programa(int indice_programa)
@@ -839,8 +858,7 @@ void configuracion_parametros_programa_actual()
   bool programa_modificado = false;
 
   // Loop hasta que se entra en edicion de parámetro o se sale de configuración:
-  hay_doble_click_rotary_enc = false;
-  hay_click_rotary_enc = false;
+  i_reset_rotary_encoder();
 
 #ifdef VERBOSE
   Serial.print("--> modo config de P_");
@@ -872,27 +890,27 @@ void configuracion_parametros_programa_actual()
           switch (variable_seleccionada)
           {
             case 0:
-              hay_cambio_valor = edicion_variable_por_cifras(String(OPCIONES_PROGRAMA_CORTAS[variable_seleccionada]),
+              hay_cambio_valor = edicion_variable_por_cifras(OPCIONES_PROGRAMA_CORTAS[variable_seleccionada],
                                                              &programa_edit.numero_movimientos,
                                                              OPCIONES_RANGO_MIN[variable_seleccionada], OPCIONES_RANGO_MAX[variable_seleccionada], 1.);
               break;
             case 1:
-              hay_cambio_valor = edicion_variable_por_cifras(String(OPCIONES_PROGRAMA_CORTAS[variable_seleccionada]),
+              hay_cambio_valor = edicion_variable_por_cifras(OPCIONES_PROGRAMA_CORTAS[variable_seleccionada],
                                                              &programa_edit.distancia_movimiento_num_pasos,
                                                              OPCIONES_RANGO_MIN[variable_seleccionada], OPCIONES_RANGO_MAX[variable_seleccionada], 1.);
               break;
             case 2:
-              hay_cambio_valor = edicion_variable_por_cifras(String(OPCIONES_PROGRAMA_CORTAS[variable_seleccionada]),
+              hay_cambio_valor = edicion_variable_por_cifras(OPCIONES_PROGRAMA_CORTAS[variable_seleccionada],
                                                              &programa_edit.velocidad_movimiento_rpm,
                                                              OPCIONES_RANGO_MIN[variable_seleccionada], OPCIONES_RANGO_MAX[variable_seleccionada], 1.);
               break;
             case 3:
-              hay_cambio_valor = edicion_variable_por_cifras(String(OPCIONES_PROGRAMA_CORTAS[variable_seleccionada]),
-                                                             &programa_edit.num_periodos_freno,
+              hay_cambio_valor = edicion_variable_por_cifras(OPCIONES_PROGRAMA_CORTAS[variable_seleccionada],
+                                                             &programa_edit.decimas_segundo_freno,
                                                              OPCIONES_RANGO_MIN[variable_seleccionada], OPCIONES_RANGO_MAX[variable_seleccionada], PERIODO_FRENO_SEG);
               break;
             case 4:
-              hay_cambio_valor = edicion_variable_por_cifras(String(OPCIONES_PROGRAMA_CORTAS[variable_seleccionada]),
+              hay_cambio_valor = edicion_variable_por_cifras(OPCIONES_PROGRAMA_CORTAS[variable_seleccionada],
                                                              &programa_edit.distancia_offset_num_pasos,
                                                              OPCIONES_RANGO_MIN[variable_seleccionada], OPCIONES_RANGO_MAX[variable_seleccionada], 1.);
               break;
@@ -973,25 +991,27 @@ void i_trim_number(uint16_t valor, float factor_conv_variable,
   if (opc_after != NULL)
     *opc_after = String("_" + *tnum_after);
 
-/*
 #ifdef VERBOSE
-  Serial.print("** DEBUG TRIM. Pos:");
+  Serial.print("** DEBUG TRIM. VALOR:");
+  Serial.print(valor);
+  Serial.print(", pos:");
   Serial.print(pos_cifra);
-  Serial.print(", Cifra: ");
+  Serial.print(", CIFRA: ");
   Serial.print(*cifra);
   Serial.print(", tnum_before: ");
   Serial.print(*tnum_before);
   Serial.print(", tnum_after: ");
   Serial.println(*tnum_after);
 #endif
-*/
 }
 
-bool edicion_variable_por_cifras(String ref_variable, uint16_t *valor_edit, uint16_t valor_min, uint16_t valor_max, float factor_conv_variable)
+bool edicion_variable_por_cifras(const char *ref_variable,
+                                 uint16_t *valor_edit,
+                                 uint16_t valor_min, uint16_t valor_max, float factor_conv_variable)
 {
   // Separación de la variable a editar por cifras separadas (# dependiente del rango). Se comienza a editar la cifra de unidades (drcha),
   // y, mediante *clicks del encoder*, se va cambiando de cifra. Para salir con el nuevo valor, *doble click* del encoder*
-  bool hay_cambio, hay_doble_click_rotary_enc;
+  bool hay_cambio, hay_doble_click_en_edit_var;
   String before, after, text_value, tnum_before, tnum_after;
   uint8_t pos_cifra, order_max, cifra;
   int valor_ant = (int)(*valor_edit * factor_conv_variable);
@@ -1003,16 +1023,16 @@ bool edicion_variable_por_cifras(String ref_variable, uint16_t *valor_edit, uint
   i_trim_number(valor, factor_conv_variable, pos_cifra, order_max,
                 &cifra, &tnum_before, &tnum_after, &before, &after);
 
-  (void)rotary_encoder->getValue();
+  i_reset_rotary_encoder();
   hay_cambio = false;
-  hay_doble_click_rotary_enc = false;
+  hay_doble_click_en_edit_var = false;
 
   //set_texto_lcd(String("* Configurando:"), String(ref_variable + " (" + valor_ant + ")"));
-  set_texto_lcd(String(ref_variable + " (" + valor_ant + ")"), String("- <--> + :  ") + valor);
+  set_texto_lcd(String(ref_variable) + " (" + valor_ant + ")", String("- <--> + :  ") + valor);
   delay(DELAY_MS_CMD_MENU / 2);
 
   set_texto_fila_lcd(String(before + String(cifra) + after), 1);
-  while (!hay_doble_click_rotary_enc)  // Salida de edicion por cifras mediante doble click
+  while (!hay_doble_click_en_edit_var)  // Salida de edicion por cifras mediante doble click
   {
     hay_cambio = i_hay_cambio_unitario_rotary_encoder(&cifra, 9);
     if (hay_cambio)
@@ -1050,7 +1070,7 @@ bool edicion_variable_por_cifras(String ref_variable, uint16_t *valor_edit, uint
 #ifdef VERBOSE
             Serial.println(String("SALIDA DBLCLICK --> ") + String(valor) + String(", -> ") + tnum_before + String(" + ") + String(cifra) + String(" + ") + tnum_after);
 #endif
-            hay_doble_click_rotary_enc = true;
+            hay_doble_click_en_edit_var = true;
             break;
         }
       }
@@ -1062,7 +1082,7 @@ bool edicion_variable_por_cifras(String ref_variable, uint16_t *valor_edit, uint
 #ifdef VERBOSE
       Serial.println("Saliendo de edicion por timeout");
 #endif
-      hay_doble_click_rotary_enc = true;
+      hay_doble_click_en_edit_var = true;
     }
 
     // Para frenar el rotary en la edicion por cifras
@@ -1075,7 +1095,7 @@ bool edicion_variable_por_cifras(String ref_variable, uint16_t *valor_edit, uint
 
   set_texto_fila_lcd(String("Se acepta: ") + (int)(valor / factor_conv_variable), 1);
   delay(DELAY_MS_CMD_MENU);
-  hay_doble_click_rotary_enc = false;
+//  hay_doble_click_rotary_enc = false;
   if (valor != valor_ant)
   {
 #ifdef VERBOSE
@@ -1119,12 +1139,31 @@ static inline int8_t i_signo(int val)
   return 1;
 }
 
+void i_reset_rotary_encoder()
+{
+  hay_doble_click_rotary_enc = false;
+  hay_click_rotary_enc = false;
+  (void)rotary_encoder->getValue();
+}
+
 bool i_hay_cambio_unitario_rotary_encoder(uint8_t *variable_edit, uint16_t valor_max)
 {
   int old_value = (int)(*variable_edit);
-  int signo_cambio = i_signo(rotary_encoder->getValue());
+  int signo_cambio = (int)i_signo(rotary_encoder->getValue());
+
   if (((signo_cambio > 0) & (old_value < valor_max)) | ((signo_cambio < 0) & (old_value > 0)))
   {
+//#ifdef VERBOSE
+//    Serial.print("DEBUG CAMBIO UNITARIO ENCODER: OLD=");
+//    Serial.print(old_value);
+//    Serial.print(", SIGNO=");
+//    Serial.print(signo_cambio);
+//    Serial.print(", NEW=");
+//    Serial.print(old_value + signo_cambio);
+//    Serial.print(", uint8=");
+//    Serial.println((uint8_t)(old_value + signo_cambio));
+//#endif
+
     old_value += signo_cambio;
     *variable_edit = (uint8_t)old_value;
     return true;
@@ -1151,7 +1190,7 @@ void i_print_config_programa(uint8_t indice_programa, const config_prog_t conf_p
   Serial.print("; VEL (rpm)=");
   Serial.print(conf_print.velocidad_movimiento_rpm);
   Serial.print("; FRENO (s)=");
-  Serial.print(conf_print.num_periodos_freno * PERIODO_FRENO_SEG);
+  Serial.print(conf_print.decimas_segundo_freno * PERIODO_FRENO_SEG);
   Serial.print("; OFFSET (num. pasos)=");
   Serial.println(conf_print.distancia_offset_num_pasos);
 }
