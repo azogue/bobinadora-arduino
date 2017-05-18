@@ -40,7 +40,7 @@
 /*
     Cambios 04/2017:
 
-    - [X] Cambio de PINs para trabajar con PLC Leonardo
+    - [X] Cambio de PINs para trabajar con PLC Leonardo/Mega
     - [X] Edicion de parámetros por cifras
     - [X] Fusión de sensores de fallo.
     - [X] Separación de frenos.
@@ -738,7 +738,6 @@ void set_estado_paro_general(int tipo_entrada_en_paro, int pin_responsable_paro)
   {
     digitalWrite(PIN_MOTOR_VARIADOR, LOW);      // Desactivamos variador
 
-    // TODO revisar timer stop
     FlexiTimer2::stop();
     activa_freno();                 // Frenado instantáneo
 
@@ -791,7 +790,6 @@ void set_estado_seleccion()
   tipo_parada = TIPO_PARADA_FINALIZACION;
   pin_fallo = -1;
   i_reset_rotary_encoder();
-  // TODO revisar timer stop
   FlexiTimer2::stop();
 }
 
